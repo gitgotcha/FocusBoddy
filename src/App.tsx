@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { AppSettings, Statistics, Task, TaskPriority, TimerMode, TimerSession, TimerState } from "./domain/models";
+import type { AppSettings, Statistics, Task, TaskPriority, TimerMode, TimerSession, TimerSnapshot } from "./domain/models";
 import { DEFAULT_SETTINGS, durationSecondsForMode } from "./domain/defaults";
 import { weekBoundaries, weekRange } from "./domain/statistics";
 import { useAppGateway } from "./services/gatewayContext";
@@ -389,49 +389,80 @@ function TimerArc({ progress, mode, isRunning, isDone }:
 }
 
 // ─── Timer Panel ──────────────────────────────────────────────────────────────
-function TimerPanel({ tasks, onLogSession, durations }: {
-  tasks: Task[];
-  onLogSession: (task: string, duration: number) => void;
-  durations: (mode: TimerMode) => number;
-}) {
+/** Plays the bundled offline completion chime. Non-fatal if it fails. */
+function playCompletionSound() {
+  try {
+    const audio = new Audio("/audio/focus-complete.wav");
+    void audio.play().catch(() => undefined);
+  } catch { /* ignore */ }
+}
 
-  const [mode, setMode]             = useState<TimerMode>("focus");
-  const [state, setState]           = useState<TimerState>("idle");
-  const [remaining, setRemaining]   = useState(durations("focus"));
-  const [selectedTask, setSelected] = useState(tasks[0]?.id ?? "");
-  const [sessions, setSessions]     = useState(0);
+/** Shows a desktop notification via the Web Notification API. */
+function notifyCompletion(taskTitle: string) {
+  try {
+    if (typeof Notification === "undefined") return;
+    const show = () => { try { new Notification("专注完成", { body: taskTitle }); } catch { /* ignore */ } };
+    if (Notification.permission === "granted") show();
+    else if (Notification.permission === "default") {
+      void Notification.requestPermission().then(p => { if (p === "granted") show(); });
+    }
+  } catch { /* ignore */ }
+}
+
+function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, onSwitchMode, onExpire }: {
+  timer: TimerSnapshot | null;
+  tasks: Task[];
+  onStart: (mode: TimerMode, taskId: string | null) => void;
+  onPause: () => void;
+  onResume: () => void;
+  onReset: () => void;
+  onSwitchMode: (mode: TimerMode) => void;
+  onExpire: () => void;
+}) {
+  // Rust owns the timer; this component only renders its snapshot.
+  const state = timer?.state ?? "idle";
+  const mode  = timer?.mode ?? "focus";
+  const total = timer?.durationSeconds ?? DEFAULT_SETTINGS.focusDurationMinutes * 60;
+
+  const [selectedTask, setSelected] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const total    = durations(mode);
-  const progress = remaining / total;
-
-  const clearTimer = useCallback(() => {
-    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
-  }, []);
-
-  const handleStart = () => { if (state === "done") setRemaining(durations(mode)); setState("running"); };
-  const handlePause = () => setState("paused");
-  const handleReset = () => { clearTimer(); setState("idle"); setRemaining(durations(mode)); };
-  const switchMode  = (m: TimerMode) => { clearTimer(); setState("idle"); setMode(m); setRemaining(durations(m)); };
-
+  // Drift-free display tick: refresh `now` while running; remaining derives
+  // from the authoritative targetEndAt, never from an incremented counter.
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (state === "running") {
-      intervalRef.current = setInterval(() => {
-        setRemaining(r => {
-          if (r <= 1) {
-            clearTimer(); setState("done"); setSessions(s => s+1);
-            const task = tasks.find(t => t.id === selectedTask);
-            onLogSession(task?.title ?? "未命名任务", durations(mode)/60);
-            return 0;
-          }
-          return r - 1;
-        });
-      }, 1000);
-    } else {
-      clearTimer();
+    if (state !== "running") {
+      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+      return;
     }
-    return clearTimer;
-  }, [state, mode, selectedTask, tasks, onLogSession, clearTimer]);
+    intervalRef.current = setInterval(() => setNow(Date.now()), 250);
+    return () => { if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; } };
+  }, [state]);
+
+  const remaining = state === "running" && timer?.targetEndAt
+    ? Math.max(0, Math.ceil((timer.targetEndAt - now) / 1000))
+    : timer?.remainingSeconds ?? total;
+  const progress = total > 0 ? remaining / total : 0;
+
+  // Fire onExpire exactly once per session when the countdown reaches zero.
+  const expiredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (state === "running" && timer?.activeSessionId && timer.targetEndAt && timer.targetEndAt <= now) {
+      if (expiredRef.current !== timer.activeSessionId) {
+        expiredRef.current = timer.activeSessionId;
+        onExpire();
+      }
+    }
+    if (state === "idle") expiredRef.current = null;
+  }, [state, timer, now, onExpire]);
+
+  const handleStart = () => {
+    if (state === "paused") onResume();
+    else if (state === "idle" || state === "done") onStart(mode, selectedTask);
+  };
+  const handlePause = () => { if (state === "running") onPause(); };
+  const handleReset = () => onReset();
+  const switchMode  = (m: TimerMode) => onSwitchMode(m);
 
   const { m, s } = formatSeconds(remaining);
   const activeTasks = tasks.filter(t => !t.done);
@@ -473,7 +504,7 @@ function TimerPanel({ tasks, onLogSession, durations }: {
             </button>
           ))}
           <div style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 10, color: C.textMuted, letterSpacing: "0.05em" }}>
-            {sessions} 次
+            {timer?.taskTitleSnapshot ?? MODE_LABELS[mode]}
           </div>
         </div>
         <HorizonDivider />
@@ -1242,27 +1273,35 @@ export default function App() {
   const [logs, setLogs]   = useState<SessionLog[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [weekStats, setWeekStats] = useState<Statistics | null>(null);
+  const [timer, setTimer] = useState<TimerSnapshot | null>(null);
+
+  // Ref mirrors so async callbacks always see the latest snapshot without
+  // becoming stale closures.
+  const timerRef = useRef<TimerSnapshot | null>(null);
+  const settingsRef = useRef<AppSettings | null>(null);
+  useEffect(() => { timerRef.current = timer; }, [timer]);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const activeSettings = settings ?? DEFAULT_SETTINGS;
   const durations = useCallback((mode: TimerMode) => durationSecondsForMode(mode, activeSettings), [activeSettings]);
 
-  // Load persisted state once. A failure (e.g. running outside Tauri) simply
-  // leaves the empty state in place rather than showing fabricated data.
-  useEffect(() => {
-    let cancelled = false;
+  const applyTimer = useCallback((snapshot: TimerSnapshot) => {
+    timerRef.current = snapshot;
+    setTimer(snapshot);
+  }, []);
+
+  // Full resync after an unexpected gateway failure (e.g. CONFLICT).
+  const resync = useCallback(() => {
     gateway.bootstrap()
       .then(payload => {
-        if (cancelled) return;
         setTasks(payload.tasks);
         setLogs(payload.sessions.map(sessionToLog));
         setSettings(payload.settings);
+        applyTimer(payload.timer);
       })
       .catch(() => undefined);
-    return () => { cancelled = true; };
-  }, [gateway]);
+  }, [gateway, applyTimer]);
 
-  // Fetch this week's statistics whenever tasks/logs/settings change —
-  // effectively after bootstrap and after any logged session.
   const refreshStats = useCallback(() => {
     const { from, to } = weekRange();
     gateway.getStatistics({ from, to, days: weekBoundaries() })
@@ -1270,12 +1309,93 @@ export default function App() {
       .catch(() => undefined);
   }, [gateway]);
 
-  useEffect(() => { refreshStats(); }, [refreshStats, tasks.length, logs.length]);
+  const runStart = useCallback(async (snapshot: TimerSnapshot, mode: TimerMode, taskId: string | null) => {
+    const next = await gateway.startTimer({ mode, selectedTaskId: taskId, expectedRevision: snapshot.revision });
+    applyTimer(next);
+  }, [gateway, applyTimer]);
+
+  const runComplete = useCallback(async (snapshot: TimerSnapshot, recovery: boolean) => {
+    if (!snapshot.activeSessionId) return;
+    const result = await gateway.completeTimer({
+      activeSessionId: snapshot.activeSessionId,
+      expectedRevision: snapshot.revision,
+      recovery,
+    });
+    applyTimer(result.timer);
+    setLogs(p => [...p, sessionToLog(result.session)]);
+
+    if (result.newlyCompleted && !recovery) {
+      const s = settingsRef.current;
+      if (s?.soundEnabled) playCompletionSound();
+      if (s?.notificationEnabled) notifyCompletion(result.session.taskTitleSnapshot);
+      // Auto-break per spec 4.2: only on a genuinely new focus completion.
+      if (s?.autoStartBreak && result.session.mode === "focus") {
+        void runStart(result.timer, "short", null).catch(() => undefined);
+      }
+    }
+  }, [gateway, applyTimer, runStart]);
+
+  const handleExpire = useCallback(() => {
+    const cur = timerRef.current;
+    if (!cur) return;
+    runComplete(cur, false).catch(resync);
+    refreshStats();
+  }, [runComplete, resync, refreshStats]);
+
+  const handleStart = useCallback((mode: TimerMode, taskId: string | null) => {
+    const cur = timerRef.current;
+    if (!cur) return;
+    runStart(cur, mode, taskId).catch(resync);
+  }, [runStart, resync]);
+
+  const runRevisionAction = useCallback(async (
+    action: "pause" | "resume" | "reset",
+  ) => {
+    const cur = timerRef.current;
+    if (!cur) return;
+    if (action === "pause")   applyTimer(await gateway.pauseTimer({ expectedRevision: cur.revision }));
+    if (action === "resume")  applyTimer(await gateway.resumeTimer({ expectedRevision: cur.revision }));
+    if (action === "reset")   applyTimer(await gateway.resetTimer({ expectedRevision: cur.revision }));
+  }, [gateway, applyTimer]);
+
+  const handlePause = useCallback(() => { runRevisionAction("pause").catch(resync); }, [runRevisionAction, resync]);
+  const handleResume = useCallback(() => { runRevisionAction("resume").catch(resync); }, [runRevisionAction, resync]);
+  const handleReset = useCallback(() => { runRevisionAction("reset").catch(resync); refreshStats(); }, [runRevisionAction, resync, refreshStats]);
+
+  const handleSwitchMode = useCallback((mode: TimerMode) => {
+    const cur = timerRef.current;
+    if (!cur) return;
+    gateway.switchTimerMode({ mode, expectedRevision: cur.revision })
+      .then(applyTimer)
+      .catch(resync);
+  }, [gateway, applyTimer, resync]);
+
+  // Load persisted state once, then recover an expired running timer
+  // (recovery=true → no auto-break per spec 4.2).
+  useEffect(() => {
+    let cancelled = false;
+    gateway.bootstrap()
+      .then(async payload => {
+        if (cancelled) return;
+        setTasks(payload.tasks);
+        setLogs(payload.sessions.map(sessionToLog));
+        setSettings(payload.settings);
+        applyTimer(payload.timer);
+        const t = payload.timer;
+        if (t.state === "running" && t.activeSessionId && t.targetEndAt && Date.now() >= t.targetEndAt) {
+          await runComplete(t, true).catch(resync);
+        }
+        refreshStats();
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [gateway, applyTimer, runComplete, resync, refreshStats]);
 
   const saveSettings = useCallback(async (next: AppSettings) => {
     const result = await gateway.saveSettings(next);
     setSettings(result.settings);
-  }, [gateway]);
+    refreshStats(); // dailyGoal is baked into the statistics payload
+  }, [gateway, refreshStats]);
 
   const createTask = useCallback(async (title: string) => {
     const task = await gateway.createTask({
@@ -1305,15 +1425,20 @@ export default function App() {
     setTasks(p => p.map(t => (t.id === id ? updated : t)));
   }, [gateway, tasks]);
 
-  const handleLogSession = useCallback((task: string, duration: number) => {
-    const now = new Date();
-    const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    setLogs(p => [...p, { id: uid(), time, duration, task }]);
-  }, []);
-
   const centerContent = (() => {
     switch (nav) {
-      case "timer":    return <TimerPanel tasks={tasks} onLogSession={handleLogSession} durations={durations} />;
+      case "timer":    return (
+        <TimerPanel
+          timer={timer}
+          tasks={tasks}
+          onStart={handleStart}
+          onPause={handlePause}
+          onResume={handleResume}
+          onReset={handleReset}
+          onSwitchMode={handleSwitchMode}
+          onExpire={handleExpire}
+        />
+      );
       case "tasks":    return (
         <TasksPanel
           tasks={tasks}
