@@ -5,7 +5,7 @@ use crate::error::CommandError;
 use crate::models::{
     AppSettings, CompleteTimerInput, CompleteTimerResult, CreateTaskInput, DayStat, ProjectStat,
     SaveSettingsResult, SessionQuery, SessionStatus, StartTimerInput, Statistics,
-    StatisticsDayBoundary, StatisticsQuery, SwitchTimerModeInput, Task, TaskPriority, TimerMode,
+    StatisticsQuery, SwitchTimerModeInput, Task, TaskPriority, TimerMode,
     TimerSession, TimerSnapshot, TimerState, UpdateTaskInput,
 };
 
@@ -1020,6 +1020,7 @@ pub fn all_time_statistics(conn: &Connection) -> Result<Statistics, CommandError
 mod tests {
     use super::*;
     use crate::db;
+    use crate::models::StatisticsDayBoundary;
 
     fn create_input(title: &str) -> CreateTaskInput {
         CreateTaskInput {
