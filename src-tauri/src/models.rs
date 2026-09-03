@@ -341,6 +341,22 @@ pub struct CompleteTimerResult {
     pub newly_completed: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionQuery {
+    pub limit: Option<i64>,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatisticsQuery {
+    pub from: i64,
+    pub to: i64,
+    pub days: Vec<StatisticsDayBoundary>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

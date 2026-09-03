@@ -3,9 +3,18 @@ use uuid::Uuid;
 
 use crate::error::CommandError;
 use crate::models::{
-    AppSettings, CreateTaskInput, ProjectStat, SaveSettingsResult, SessionStatus, Statistics, Task,
-    TaskPriority, TimerMode, TimerSession, TimerSnapshot, TimerState, UpdateTaskInput,
+    AppSettings, CompleteTimerInput, CompleteTimerResult, CreateTaskInput, DayStat, ProjectStat,
+    SaveSettingsResult, SessionQuery, SessionStatus, StartTimerInput, Statistics,
+    StatisticsDayBoundary, StatisticsQuery, SwitchTimerModeInput, Task, TaskPriority, TimerMode,
+    TimerSession, TimerSnapshot, TimerState, UpdateTaskInput,
 };
+
+// ─── Fixed snapshot labels (design spec §3) ──────────────────────────────────
+pub const NO_TASK_TITLE: &str = "未指定任务";
+pub const NO_TASK_PROJECT: &str = "通用";
+pub const SHORT_BREAK_TITLE: &str = "短休";
+pub const LONG_BREAK_TITLE: &str = "长休";
+pub const BREAK_PROJECT: &str = "休息";
 
 pub const MIN_POMODORO_TARGET: i64 = 1;
 pub const MAX_POMODORO_TARGET: i64 = 99;
@@ -389,6 +398,578 @@ pub fn list_sessions(conn: &Connection, limit: i64) -> Result<Vec<TimerSession>,
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+// ─── Timer state machine (design spec §4) ────────────────────────────────────
+
+/// Computes the snapshot title/project for a timer start, per spec §3.
+fn snapshot_for_mode(mode: TimerMode, task: Option<&Task>) -> (String, String) {
+    match mode {
+        TimerMode::Focus => {
+            if let Some(t) = task {
+                (t.title.clone(), t.project.clone())
+            } else {
+                (NO_TASK_TITLE.to_owned(), NO_TASK_PROJECT.to_owned())
+            }
+        }
+        TimerMode::Short => (SHORT_BREAK_TITLE.to_owned(), BREAK_PROJECT.to_owned()),
+        TimerMode::Long => (LONG_BREAK_TITLE.to_owned(), BREAK_PROJECT.to_owned()),
+    }
+}
+
+/// Live remaining seconds for a running timer, derived from `target_end_at`.
+fn live_remaining(timer: &TimerSnapshot, now: i64) -> i64 {
+    match timer.target_end_at {
+        Some(end) => ((end - now) / 1000).max(0),
+        None => timer.remaining_seconds,
+    }
+}
+
+/// Writes an abandoned session for a timer that was started but not completed.
+/// Uses the timer's `active_session_id` so the session is traceable to its start.
+fn write_abandoned_session(
+    conn: &Connection,
+    timer: &TimerSnapshot,
+    now: i64,
+) -> Result<(), CommandError> {
+    let session_id = timer
+        .active_session_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let session = TimerSession {
+        id: session_id,
+        task_id: timer.selected_task_id.clone(),
+        task_title_snapshot: timer.task_title_snapshot.clone().unwrap_or_default(),
+        project_snapshot: timer.project_snapshot.clone().unwrap_or_default(),
+        mode: timer.mode,
+        status: SessionStatus::Abandoned,
+        planned_seconds: timer.duration_seconds,
+        focused_seconds: timer.duration_seconds - timer.remaining_seconds,
+        started_at: timer.started_at.unwrap_or(now),
+        ended_at: now,
+    };
+    conn.execute(
+        "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
+                               status, planned_seconds, focused_seconds, started_at, ended_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            session.id,
+            session.task_id,
+            session.task_title_snapshot,
+            session.project_snapshot,
+            session.mode.as_str(),
+            session.status.as_str(),
+            session.planned_seconds,
+            session.focused_seconds,
+            session.started_at,
+            session.ended_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Checks that the timer's revision matches `expected_revision`, else CONFLICT.
+fn check_revision(timer: &TimerSnapshot, expected: i64) -> Result<(), CommandError> {
+    if timer.revision != expected {
+        return Err(CommandError::conflict(format!(
+            "timer revision mismatch: expected {expected}, found {}",
+            timer.revision
+        )));
+    }
+    Ok(())
+}
+
+/// `start_timer`: idle/done → running. Copies task snapshots, generates a
+/// session UUID, computes `target_end_at`, bumps revision.
+pub fn start_timer(
+    conn: &mut Connection,
+    settings: &AppSettings,
+    input: &StartTimerInput,
+) -> Result<TimerSnapshot, CommandError> {
+    let tx = conn.transaction()?;
+    let mut timer = get_timer(&tx)?;
+    check_revision(&timer, input.expected_revision)?;
+
+    if timer.state != TimerState::Idle && timer.state != TimerState::Done {
+        return Err(CommandError::validation(format!(
+            "start_timer requires idle or done state, found {:?}",
+            timer.state
+        )));
+    }
+
+    let task = match (&input.selected_task_id, input.mode) {
+        (Some(id), TimerMode::Focus) => Some(get_task(&tx, id)?),
+        _ => None,
+    };
+    let (title_snap, project_snap) = snapshot_for_mode(input.mode, task.as_ref());
+    let duration = settings.duration_seconds_for_mode(input.mode);
+    let now = now_millis();
+    let session_id = Uuid::new_v4().to_string();
+
+    timer.mode = input.mode;
+    timer.state = TimerState::Running;
+    timer.active_session_id = Some(session_id);
+    timer.selected_task_id = input.selected_task_id.clone();
+    timer.task_title_snapshot = Some(title_snap);
+    timer.project_snapshot = Some(project_snap);
+    timer.duration_seconds = duration;
+    timer.remaining_seconds = duration;
+    timer.started_at = Some(now);
+    timer.target_end_at = Some(now + duration * 1000);
+    timer.paused_at = None;
+    timer.revision += 1;
+    timer.updated_at = now;
+
+    write_timer(&tx, &timer)?;
+    tx.commit()?;
+    Ok(timer)
+}
+
+/// `pause_timer`: running → paused. Computes remaining from `target_end_at`,
+/// clears `target_end_at`, bumps revision.
+pub fn pause_timer(
+    conn: &mut Connection,
+    input: &crate::models::TimerRevisionInput,
+) -> Result<TimerSnapshot, CommandError> {
+    let tx = conn.transaction()?;
+    let mut timer = get_timer(&tx)?;
+    check_revision(&timer, input.expected_revision)?;
+
+    if timer.state != TimerState::Running {
+        return Err(CommandError::validation(format!(
+            "pause_timer requires running state, found {:?}",
+            timer.state
+        )));
+    }
+
+    let now = now_millis();
+    timer.remaining_seconds = live_remaining(&timer, now);
+    timer.state = TimerState::Paused;
+    timer.target_end_at = None;
+    timer.paused_at = Some(now);
+    timer.revision += 1;
+    timer.updated_at = now;
+
+    write_timer(&tx, &timer)?;
+    tx.commit()?;
+    Ok(timer)
+}
+
+/// `resume_timer`: paused → running. Generates a new `target_end_at` from
+/// remaining, bumps revision.
+pub fn resume_timer(
+    conn: &mut Connection,
+    input: &crate::models::TimerRevisionInput,
+) -> Result<TimerSnapshot, CommandError> {
+    let tx = conn.transaction()?;
+    let mut timer = get_timer(&tx)?;
+    check_revision(&timer, input.expected_revision)?;
+
+    if timer.state != TimerState::Paused {
+        return Err(CommandError::validation(format!(
+            "resume_timer requires paused state, found {:?}",
+            timer.state
+        )));
+    }
+
+    let now = now_millis();
+    timer.state = TimerState::Running;
+    timer.target_end_at = Some(now + timer.remaining_seconds * 1000);
+    timer.paused_at = None;
+    timer.revision += 1;
+    timer.updated_at = now;
+
+    write_timer(&tx, &timer)?;
+    tx.commit()?;
+    Ok(timer)
+}
+
+/// `reset_timer`: any → idle (current mode). If a session was started, writes
+/// an abandoned session first. Bumps revision.
+pub fn reset_timer(
+    conn: &mut Connection,
+    settings: &AppSettings,
+    input: &crate::models::TimerRevisionInput,
+) -> Result<TimerSnapshot, CommandError> {
+    let tx = conn.transaction()?;
+    let mut timer = get_timer(&tx)?;
+    check_revision(&timer, input.expected_revision)?;
+
+    let now = now_millis();
+    let started = timer.state != TimerState::Idle
+        && timer.active_session_id.is_some()
+        && timer.started_at.is_some();
+
+    if started {
+        timer.remaining_seconds = match timer.state {
+            TimerState::Running => live_remaining(&timer, now),
+            _ => timer.remaining_seconds,
+        };
+        write_abandoned_session(&tx, &timer, now)?;
+    }
+
+    let duration = settings.duration_seconds_for_mode(timer.mode);
+    timer.state = TimerState::Idle;
+    timer.active_session_id = None;
+    timer.selected_task_id = None;
+    timer.task_title_snapshot = None;
+    timer.project_snapshot = None;
+    timer.duration_seconds = duration;
+    timer.remaining_seconds = duration;
+    timer.started_at = None;
+    timer.target_end_at = None;
+    timer.paused_at = None;
+    timer.revision += 1;
+    timer.updated_at = now;
+
+    write_timer(&tx, &timer)?;
+    tx.commit()?;
+    Ok(timer)
+}
+
+/// `switch_timer_mode`: any → idle (new mode). If a session was started,
+/// writes an abandoned session first. Bumps revision.
+pub fn switch_timer_mode(
+    conn: &mut Connection,
+    settings: &AppSettings,
+    input: &SwitchTimerModeInput,
+) -> Result<TimerSnapshot, CommandError> {
+    let tx = conn.transaction()?;
+    let mut timer = get_timer(&tx)?;
+    check_revision(&timer, input.expected_revision)?;
+
+    let now = now_millis();
+    let started = timer.state != TimerState::Idle
+        && timer.active_session_id.is_some()
+        && timer.started_at.is_some();
+
+    if started {
+        timer.remaining_seconds = match timer.state {
+            TimerState::Running => live_remaining(&timer, now),
+            _ => timer.remaining_seconds,
+        };
+        write_abandoned_session(&tx, &timer, now)?;
+    }
+
+    let duration = settings.duration_seconds_for_mode(input.mode);
+    timer.mode = input.mode;
+    timer.state = TimerState::Idle;
+    timer.active_session_id = None;
+    timer.selected_task_id = None;
+    timer.task_title_snapshot = None;
+    timer.project_snapshot = None;
+    timer.duration_seconds = duration;
+    timer.remaining_seconds = duration;
+    timer.started_at = None;
+    timer.target_end_at = None;
+    timer.paused_at = None;
+    timer.revision += 1;
+    timer.updated_at = now;
+
+    write_timer(&tx, &timer)?;
+    tx.commit()?;
+    Ok(timer)
+}
+
+/// `complete_timer`: running → done. Idempotent — if a completed session with
+/// the same `activeSessionId` already exists, returns it with
+/// `newlyCompleted = false`. If an abandoned session exists, returns CONFLICT.
+pub fn complete_timer(
+    conn: &mut Connection,
+    _settings: &AppSettings,
+    input: &CompleteTimerInput,
+) -> Result<CompleteTimerResult, CommandError> {
+    let tx = conn.transaction()?;
+
+    // 1–2: Check if a session with this ID already exists.
+    let existing: Option<(String, String)> = tx
+        .query_row(
+            "SELECT status, mode FROM sessions WHERE id = ?1",
+            params![input.active_session_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+
+    if let Some((status, _mode)) = &existing {
+        if status == "completed" {
+            // Idempotent: return the existing session and done timer.
+            let session = tx
+                .query_row(
+                    &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
+                    params![input.active_session_id],
+                    session_from_row,
+                )
+                .optional()?
+                .ok_or_else(|| CommandError::internal("completed session disappeared mid-query"))?;
+            let timer = get_timer(&tx)?;
+            let stats = all_time_statistics(&tx)?;
+            return Ok(CompleteTimerResult {
+                timer,
+                session,
+                statistics: stats,
+                newly_completed: false,
+            });
+        }
+        if status == "abandoned" {
+            return Err(CommandError::conflict(
+                "cannot complete a session that was already abandoned",
+            ));
+        }
+    }
+
+    // 3: Validate timer state, active session, revision.
+    let mut timer = get_timer(&tx)?;
+    check_revision(&timer, input.expected_revision)?;
+
+    if timer.state != TimerState::Running {
+        return Err(CommandError::validation(format!(
+            "complete_timer requires running state, found {:?}",
+            timer.state
+        )));
+    }
+    match &timer.active_session_id {
+        Some(id) if id == &input.active_session_id => {}
+        _ => return Err(CommandError::validation("activeSessionId does not match timer")),
+    }
+
+    // 4: Compute focused time from target_end_at (drift-free).
+    let now = now_millis();
+    let actual_remaining = live_remaining(&timer, now);
+    let focused = timer.duration_seconds - actual_remaining;
+
+    let session = TimerSession {
+        id: input.active_session_id.clone(),
+        task_id: timer.selected_task_id.clone(),
+        task_title_snapshot: timer.task_title_snapshot.clone().unwrap_or_else(|| NO_TASK_TITLE.to_owned()),
+        project_snapshot: timer.project_snapshot.clone().unwrap_or_else(|| NO_TASK_PROJECT.to_owned()),
+        mode: timer.mode,
+        status: SessionStatus::Completed,
+        planned_seconds: timer.duration_seconds,
+        focused_seconds: focused.max(0),
+        started_at: timer.started_at.unwrap_or(now),
+        ended_at: now,
+    };
+
+    // 4: INSERT with ON CONFLICT DO NOTHING so a duplicate insert is a no-op.
+    let inserted = tx.execute(
+        "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
+                               status, planned_seconds, focused_seconds, started_at, ended_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            session.id,
+            session.task_id,
+            session.task_title_snapshot,
+            session.project_snapshot,
+            session.mode.as_str(),
+            session.status.as_str(),
+            session.planned_seconds,
+            session.focused_seconds,
+            session.started_at,
+            session.ended_at,
+        ],
+    )?;
+
+    // 5: Set timer to done, remaining to zero, bump revision.
+    timer.state = TimerState::Done;
+    timer.remaining_seconds = 0;
+    timer.target_end_at = None;
+    timer.revision += 1;
+    timer.updated_at = now;
+    write_timer(&tx, &timer)?;
+
+    let stats = all_time_statistics(&tx)?;
+    tx.commit()?;
+
+    // 6: newlyCompleted = true only if we actually inserted the row.
+    Ok(CompleteTimerResult {
+        timer,
+        session,
+        statistics: stats,
+        newly_completed: inserted > 0,
+    })
+}
+
+/// Lists sessions matching the frontend's query (limit + optional time range).
+pub fn list_sessions_query(
+    conn: &Connection,
+    query: &SessionQuery,
+) -> Result<Vec<TimerSession>, CommandError> {
+    let mut sql = String::from("SELECT ");
+    sql.push_str(SESSION_COLUMNS);
+    sql.push_str(" FROM sessions WHERE 1=1");
+    let mut bindings: Vec<i64> = Vec::new();
+    if let Some(from) = query.from {
+        sql.push_str(" AND started_at >= ?");
+        bindings.push(from);
+    }
+    if let Some(to) = query.to {
+        sql.push_str(" AND started_at <= ?");
+        bindings.push(to);
+    }
+    sql.push_str(" ORDER BY started_at DESC, rowid DESC");
+    if let Some(limit) = query.limit {
+        sql.push_str(" LIMIT ?");
+        bindings.push(limit);
+    }
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params = rusqlite::params_from_iter(bindings.iter());
+    let rows = stmt.query_map(params, session_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Validates the frontend's explicit day boundaries per the spec §6:
+/// - days must be ordered by date
+/// - no overlaps
+/// - each segment from < to
+/// - each segment must fall within the total [from, to] range
+fn validate_day_boundaries(query: &StatisticsQuery) -> Result<(), CommandError> {
+    let days = &query.days;
+    for (i, d) in days.iter().enumerate() {
+        if d.from >= d.to {
+            return Err(CommandError::validation(format!(
+                "day boundary '{}' has from >= to",
+                d.date
+            )));
+        }
+        if d.from < query.from || d.to > query.to {
+            return Err(CommandError::validation(format!(
+                "day boundary '{}' falls outside the total range",
+                d.date
+            )));
+        }
+        if i > 0 {
+            let prev = &days[i - 1];
+            if d.from < prev.to {
+                return Err(CommandError::validation(format!(
+                    "day boundaries overlap: '{}' and '{}'",
+                    prev.date, d.date
+                )));
+            }
+            if d.date <= prev.date {
+                return Err(CommandError::validation(format!(
+                    "day boundaries must be ordered: '{}' before '{}'",
+                    d.date, prev.date
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Computes statistics for an explicit time range with per-day buckets.
+///
+/// Per the spec §6: only `mode = 'focus' AND status = 'completed'` sessions
+/// are counted. `streak_days` is the consecutive-day count ending today (or
+/// yesterday if today has no sessions). `best_day` is the date with the most
+/// focus seconds. Rust does NOT guess DST day buckets — it uses the explicit
+/// `days` array provided by the frontend.
+pub fn get_statistics(
+    conn: &Connection,
+    query: &StatisticsQuery,
+) -> Result<Statistics, CommandError> {
+    validate_day_boundaries(query)?;
+
+    // Collect completed focus sessions in range.
+    let mut stmt = conn.prepare(
+        "SELECT id, task_id, task_title_snapshot, project_snapshot, mode, status,
+                planned_seconds, focused_seconds, started_at, ended_at
+         FROM sessions
+         WHERE mode = 'focus' AND status = 'completed'
+           AND started_at >= ?1 AND started_at <= ?2
+         ORDER BY started_at ASC",
+    )?;
+    let sessions: Vec<TimerSession> = stmt
+        .query_map(params![query.from, query.to], session_from_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let focus_session_count = sessions.len() as i64;
+    let focus_seconds: i64 = sessions.iter().map(|s| s.focused_seconds).sum();
+
+    // by_day: bucket each session into the frontend-provided day boundaries.
+    let mut by_day_map: std::collections::BTreeMap<String, (i64, i64)> =
+        query.days.iter().map(|d| (d.date.clone(), (0, 0))).collect();
+    for s in &sessions {
+        for d in &query.days {
+            // Half-open [from, to) so a session at a day boundary falls into
+            // exactly one bucket, matching the spec's non-overlap invariant.
+            if s.started_at >= d.from && s.started_at < d.to {
+                if let Some(entry) = by_day_map.get_mut(&d.date) {
+                    entry.0 += 1;
+                    entry.1 += s.focused_seconds;
+                }
+                break;
+            }
+        }
+    }
+    let by_day: Vec<DayStat> = by_day_map
+        .iter()
+        .map(|(date, (sessions, seconds))| DayStat {
+            date: date.clone(),
+            sessions: *sessions,
+            focus_seconds: *seconds,
+        })
+        .collect();
+
+    // by_project: aggregate across all sessions in range.
+    let mut by_project_map: std::collections::BTreeMap<String, (i64, i64)> = std::collections::BTreeMap::new();
+    for s in &sessions {
+        let entry = by_project_map.entry(s.project_snapshot.clone()).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += s.focused_seconds;
+    }
+    let by_project: Vec<ProjectStat> = by_project_map
+        .iter()
+        .map(|(project, (sessions, seconds))| ProjectStat {
+            project: project.clone(),
+            sessions: *sessions,
+            focus_seconds: *seconds,
+        })
+        .collect();
+
+    // best_day: the date with the most focus seconds.
+    let best_day = by_day
+        .iter()
+        .filter(|d| d.focus_seconds > 0)
+        .max_by_key(|d| d.focus_seconds)
+        .map(|d| d.date.clone());
+
+    // streak_days: consecutive days ending today (or yesterday).
+    let streak_days = compute_streak(&by_day);
+
+    let settings = get_settings(conn)?;
+
+    Ok(Statistics {
+        from: query.from,
+        to: query.to,
+        focus_session_count,
+        focus_seconds,
+        daily_goal: settings.daily_goal,
+        streak_days,
+        best_day,
+        by_day,
+        by_project,
+    })
+}
+
+/// Counts consecutive days with at least one completed focus session,
+/// ending at the last day in `by_day` (which the frontend ensures is today
+/// or the most recent day with data).
+fn compute_streak(by_day: &[DayStat]) -> i64 {
+    if by_day.is_empty() {
+        return 0;
+    }
+    // Walk backwards from the end while sessions > 0.
+    let mut streak = 0i64;
+    for day in by_day.iter().rev() {
+        if day.sessions > 0 {
+            streak += 1;
+        } else {
+            break;
+        }
+    }
+    streak
+}
+
 /// All-time focus totals.
 ///
 /// `by_day`, `streak_days` and `best_day` all depend on the caller's local
@@ -701,5 +1282,488 @@ mod tests {
 
         settings.daily_goal = 100;
         assert!(save_settings(&conn, &settings).is_err());
+    }
+
+    // ─── Statistics tests (T9) ───────────────────────────────────────────────
+
+    fn seed_completed_focus(conn: &Connection, id: &str, started_at: i64, focused: i64, project: &str) {
+        conn.execute(
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
+                                   status, planned_seconds, focused_seconds, started_at, ended_at)
+             VALUES (?1, NULL, 'task', ?2, 'focus', 'completed', 1500, ?3, ?4, ?5)",
+            params![id, project, focused, started_at, started_at + focused * 1000],
+        )
+        .expect("seed session");
+    }
+
+    #[test]
+    fn get_statistics_buckets_sessions_into_explicit_day_boundaries() {
+        let conn = db::open_in_memory().expect("db");
+
+        // Day 1: 0..86400000, Day 2: 86400000..172800000
+        seed_completed_focus(&conn, "s1", 1000, 1500, "Abyssal");
+        seed_completed_focus(&conn, "s2", 50000000, 1500, "Abyssal");
+        seed_completed_focus(&conn, "s3", 80000000, 1200, "Design");
+        seed_completed_focus(&conn, "s4", 100000000, 1500, "Abyssal");
+
+        let stats = get_statistics(
+            &conn,
+            &StatisticsQuery {
+                from: 0,
+                to: 172800000,
+                days: vec![
+                    StatisticsDayBoundary { date: "2026-01-01".into(), from: 0, to: 86400000 },
+                    StatisticsDayBoundary { date: "2026-01-02".into(), from: 86400000, to: 172800000 },
+                ],
+            },
+        )
+        .expect("stats");
+
+        assert_eq!(stats.focus_session_count, 4);
+        assert_eq!(stats.focus_seconds, 5700);
+        assert_eq!(stats.by_day.len(), 2);
+        assert_eq!(stats.by_day[0].date, "2026-01-01");
+        assert_eq!(stats.by_day[0].sessions, 3);
+        assert_eq!(stats.by_day[0].focus_seconds, 4200);
+        assert_eq!(stats.by_day[1].date, "2026-01-02");
+        assert_eq!(stats.by_day[1].sessions, 1);
+        assert_eq!(stats.by_day[1].focus_seconds, 1500);
+    }
+
+    #[test]
+    fn get_statistics_computes_by_project_aggregation() {
+        let conn = db::open_in_memory().expect("db");
+
+        seed_completed_focus(&conn, "s1", 1000, 1500, "Abyssal");
+        seed_completed_focus(&conn, "s2", 2000, 1500, "Abyssal");
+        seed_completed_focus(&conn, "s3", 3000, 900, "Design");
+
+        let stats = get_statistics(
+            &conn,
+            &StatisticsQuery {
+                from: 0,
+                to: 172800000,
+                days: vec![],
+            },
+        )
+        .expect("stats");
+
+        assert_eq!(stats.by_project.len(), 2);
+        let abyssal = stats.by_project.iter().find(|p| p.project == "Abyssal").expect("Abyssal");
+        assert_eq!(abyssal.sessions, 2);
+        assert_eq!(abyssal.focus_seconds, 3000);
+    }
+
+    #[test]
+    fn get_statistics_finds_best_day() {
+        let conn = db::open_in_memory().expect("db");
+
+        seed_completed_focus(&conn, "s1", 1000, 1500, "A");
+        seed_completed_focus(&conn, "s2", 90000000, 3000, "B");
+
+        let stats = get_statistics(
+            &conn,
+            &StatisticsQuery {
+                from: 0,
+                to: 172800000,
+                days: vec![
+                    StatisticsDayBoundary { date: "d1".into(), from: 0, to: 86400000 },
+                    StatisticsDayBoundary { date: "d2".into(), from: 86400000, to: 172800000 },
+                ],
+            },
+        )
+        .expect("stats");
+
+        assert_eq!(stats.best_day, Some("d2".to_owned()));
+    }
+
+    #[test]
+    fn get_statistics_computes_streak_from_consecutive_days() {
+        let conn = db::open_in_memory().expect("db");
+
+        // 3 consecutive days with sessions, then a gap.
+        seed_completed_focus(&conn, "s1", 0, 1500, "A");
+        seed_completed_focus(&conn, "s2", 86400000, 1500, "A");
+        seed_completed_focus(&conn, "s3", 172800000, 1500, "A");
+        // Day 4: no session.
+        // Day 5: session (streak should be 2 from the end).
+        seed_completed_focus(&conn, "s4", 345600000, 1500, "A");
+
+        let stats = get_statistics(
+            &conn,
+            &StatisticsQuery {
+                from: 0,
+                to: 432000000,
+                days: vec![
+                    StatisticsDayBoundary { date: "d1".into(), from: 0, to: 86400000 },
+                    StatisticsDayBoundary { date: "d2".into(), from: 86400000, to: 172800000 },
+                    StatisticsDayBoundary { date: "d3".into(), from: 172800000, to: 259200000 },
+                    StatisticsDayBoundary { date: "d4".into(), from: 259200000, to: 345600000 },
+                    StatisticsDayBoundary { date: "d5".into(), from: 345600000, to: 432000000 },
+                ],
+            },
+        )
+        .expect("stats");
+
+        // Walking backwards: d5 has 1 session, d4 has 0 → streak = 1.
+        assert_eq!(stats.streak_days, 1);
+    }
+
+    #[test]
+    fn get_statistics_rejects_overlapping_day_boundaries() {
+        let conn = db::open_in_memory().expect("db");
+
+        let result = get_statistics(
+            &conn,
+            &StatisticsQuery {
+                from: 0,
+                to: 172800000,
+                days: vec![
+                    StatisticsDayBoundary { date: "d1".into(), from: 0, to: 90000000 },
+                    StatisticsDayBoundary { date: "d2".into(), from: 80000000, to: 172800000 },
+                ],
+            },
+        );
+        assert!(matches!(result, Err(ref e) if e.code == crate::error::ErrorCode::ValidationError));
+    }
+
+    #[test]
+    fn get_statistics_rejects_unordered_dates() {
+        let conn = db::open_in_memory().expect("db");
+
+        let result = get_statistics(
+            &conn,
+            &StatisticsQuery {
+                from: 0,
+                to: 172800000,
+                days: vec![
+                    StatisticsDayBoundary { date: "2026-01-02".into(), from: 0, to: 86400000 },
+                    StatisticsDayBoundary { date: "2026-01-01".into(), from: 86400000, to: 172800000 },
+                ],
+            },
+        );
+        assert!(matches!(result, Err(ref e) if e.code == crate::error::ErrorCode::ValidationError));
+    }
+
+    #[test]
+    fn get_statistics_rejects_boundary_outside_total_range() {
+        let conn = db::open_in_memory().expect("db");
+
+        let result = get_statistics(
+            &conn,
+            &StatisticsQuery {
+                from: 1000,
+                to: 2000,
+                days: vec![
+                    StatisticsDayBoundary { date: "d1".into(), from: 0, to: 500 },
+                ],
+            },
+        );
+        assert!(matches!(result, Err(ref e) if e.code == crate::error::ErrorCode::ValidationError));
+    }
+
+    #[test]
+    fn list_sessions_query_filters_by_time_range_and_limit() {
+        let conn = db::open_in_memory().expect("db");
+
+        seed_completed_focus(&conn, "s1", 100, 1500, "A");
+        seed_completed_focus(&conn, "s2", 200, 1500, "A");
+        seed_completed_focus(&conn, "s3", 300, 1500, "A");
+
+        let all = list_sessions_query(&conn, &SessionQuery { limit: None, from: None, to: None })
+            .expect("query");
+        assert_eq!(all.len(), 3);
+
+        let limited = list_sessions_query(&conn, &SessionQuery { limit: Some(2), from: None, to: None })
+            .expect("query");
+        assert_eq!(limited.len(), 2);
+        // Most recent first.
+        assert_eq!(limited[0].id, "s3");
+
+        let ranged = list_sessions_query(&conn, &SessionQuery { limit: None, from: Some(150), to: Some(250) })
+            .expect("query");
+        assert_eq!(ranged.len(), 1);
+        assert_eq!(ranged[0].id, "s2");
+    }
+
+    // ─── Timer state machine tests ───────────────────────────────────────────
+
+    fn settings() -> AppSettings {
+        AppSettings::default()
+    }
+
+    #[test]
+    fn start_timer_creates_a_running_session_with_task_snapshot() {
+        let mut conn = db::open_in_memory().expect("db");
+        let task = insert_task(&conn, &CreateTaskInput {
+            title: "Write tests".to_owned(),
+            pomodoro_target: 3,
+            priority: TaskPriority::High,
+            project: "Backend".to_owned(),
+        }).expect("task");
+
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0,
+            mode: TimerMode::Focus,
+            selected_task_id: Some(task.id.clone()),
+        }).expect("start");
+
+        assert_eq!(timer.state, TimerState::Running);
+        assert_eq!(timer.mode, TimerMode::Focus);
+        assert!(timer.active_session_id.is_some());
+        assert_eq!(timer.selected_task_id, Some(task.id));
+        assert_eq!(timer.task_title_snapshot.as_deref(), Some("Write tests"));
+        assert_eq!(timer.project_snapshot.as_deref(), Some("Backend"));
+        assert!(timer.target_end_at.is_some());
+        assert_eq!(timer.revision, 1);
+        assert_eq!(timer.duration_seconds, 1500);
+    }
+
+    #[test]
+    fn start_timer_without_task_uses_fixed_snapshot() {
+        let mut conn = db::open_in_memory().expect("db");
+
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0,
+            mode: TimerMode::Focus,
+            selected_task_id: None,
+        }).expect("start");
+
+        assert_eq!(timer.task_title_snapshot.as_deref(), Some("未指定任务"));
+        assert_eq!(timer.project_snapshot.as_deref(), Some("通用"));
+    }
+
+    #[test]
+    fn start_short_break_uses_break_snapshot() {
+        let mut conn = db::open_in_memory().expect("db");
+
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0,
+            mode: TimerMode::Short,
+            selected_task_id: None,
+        }).expect("start");
+
+        assert_eq!(timer.task_title_snapshot.as_deref(), Some("短休"));
+        assert_eq!(timer.project_snapshot.as_deref(), Some("休息"));
+        assert_eq!(timer.duration_seconds, 300);
+    }
+
+    #[test]
+    fn start_rejects_wrong_revision() {
+        let mut conn = db::open_in_memory().expect("db");
+
+        let result = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 99,
+            mode: TimerMode::Focus,
+            selected_task_id: None,
+        });
+
+        assert!(matches!(result, Err(e) if e.code == crate::error::ErrorCode::Conflict));
+    }
+
+    #[test]
+    fn start_rejects_already_running() {
+        let mut conn = db::open_in_memory().expect("db");
+        start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("first start");
+
+        let result = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 1, mode: TimerMode::Focus, selected_task_id: None,
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pause_resume_round_trip_preserves_remaining() {
+        let mut conn = db::open_in_memory().expect("db");
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+
+        // Simulate 5 seconds elapsed.
+        timer.target_end_at = Some(now_millis() + (1500 - 5) * 1000);
+        write_timer(&conn, &timer).expect("write");
+
+        let paused = pause_timer(&mut conn, &crate::models::TimerRevisionInput {
+            expected_revision: 1,
+        }).expect("pause");
+
+        assert_eq!(paused.state, TimerState::Paused);
+        assert!(paused.target_end_at.is_none());
+        assert!(paused.paused_at.is_some());
+        assert_eq!(paused.revision, 2);
+        // Remaining should be ~1495 (allow small timing drift).
+        assert!(paused.remaining_seconds >= 1490 && paused.remaining_seconds <= 1500);
+
+        let resumed = resume_timer(&mut conn, &crate::models::TimerRevisionInput {
+            expected_revision: 2,
+        }).expect("resume");
+
+        assert_eq!(resumed.state, TimerState::Running);
+        assert!(resumed.target_end_at.is_some());
+        assert!(resumed.paused_at.is_none());
+        assert_eq!(resumed.revision, 3);
+    }
+
+    #[test]
+    fn pause_rejects_non_running() {
+        let mut conn = db::open_in_memory().expect("db");
+
+        let result = pause_timer(&mut conn, &crate::models::TimerRevisionInput {
+            expected_revision: 0,
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reset_from_running_writes_abandoned_and_returns_idle() {
+        let mut conn = db::open_in_memory().expect("db");
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+
+        // Simulate 10s elapsed.
+        timer.target_end_at = Some(now_millis() + 1490 * 1000);
+        write_timer(&conn, &timer).expect("write");
+
+        let reset = reset_timer(&mut conn, &settings(), &crate::models::TimerRevisionInput {
+            expected_revision: 1,
+        }).expect("reset");
+
+        assert_eq!(reset.state, TimerState::Idle);
+        assert_eq!(reset.active_session_id, None);
+        assert_eq!(reset.revision, 2);
+        assert_eq!(reset.remaining_seconds, 1500);
+
+        let sessions = list_sessions(&conn, 10).expect("sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, SessionStatus::Abandoned);
+    }
+
+    #[test]
+    fn reset_from_idle_does_not_create_session() {
+        let mut conn = db::open_in_memory().expect("db");
+
+        let reset = reset_timer(&mut conn, &settings(), &crate::models::TimerRevisionInput {
+            expected_revision: 0,
+        }).expect("reset");
+
+        assert_eq!(reset.state, TimerState::Idle);
+        assert_eq!(reset.revision, 1);
+
+        let sessions = list_sessions(&conn, 10).expect("sessions");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn switch_mode_writes_abandoned_and_changes_mode() {
+        let mut conn = db::open_in_memory().expect("db");
+        start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+
+        let switched = switch_timer_mode(&mut conn, &settings(), &SwitchTimerModeInput {
+            expected_revision: 1, mode: TimerMode::Short,
+        }).expect("switch");
+
+        assert_eq!(switched.mode, TimerMode::Short);
+        assert_eq!(switched.state, TimerState::Idle);
+        assert_eq!(switched.duration_seconds, 300);
+        assert_eq!(switched.revision, 2);
+
+        let sessions = list_sessions(&conn, 10).expect("sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, SessionStatus::Abandoned);
+        assert_eq!(sessions[0].mode, TimerMode::Focus);
+    }
+
+    #[test]
+    fn complete_timer_creates_completed_session_and_done_timer() {
+        let mut conn = db::open_in_memory().expect("db");
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        let result = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 1,
+            active_session_id: session_id.clone(),
+            recovery: None,
+        }).expect("complete");
+
+        assert!(result.newly_completed);
+        assert_eq!(result.timer.state, TimerState::Done);
+        assert_eq!(result.timer.remaining_seconds, 0);
+        assert_eq!(result.timer.revision, 2);
+        assert_eq!(result.session.id, session_id);
+        assert_eq!(result.session.status, SessionStatus::Completed);
+        assert_eq!(result.session.mode, TimerMode::Focus);
+    }
+
+    #[test]
+    fn complete_timer_is_idempotent() {
+        let mut conn = db::open_in_memory().expect("db");
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        let first = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 1, active_session_id: session_id.clone(), recovery: None,
+        }).expect("first complete");
+
+        assert!(first.newly_completed);
+
+        // Second call with the same session ID returns the same session.
+        let second = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 2, active_session_id: session_id, recovery: None,
+        }).expect("idempotent");
+
+        assert!(!second.newly_completed);
+        assert_eq!(second.session.id, first.session.id);
+        assert_eq!(second.session.status, SessionStatus::Completed);
+
+        // Only one session in the DB.
+        let sessions = list_sessions(&conn, 10).expect("sessions");
+        assert_eq!(sessions.len(), 1);
+    }
+
+    #[test]
+    fn complete_timer_rejects_abandoned_session_id() {
+        let mut conn = db::open_in_memory().expect("db");
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        // Reset writes an abandoned session with that ID.
+        reset_timer(&mut conn, &settings(), &crate::models::TimerRevisionInput {
+            expected_revision: 1,
+        }).expect("reset");
+
+        let result = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 2, active_session_id: session_id, recovery: None,
+        });
+
+        assert!(matches!(result, Err(e) if e.code == crate::error::ErrorCode::Conflict));
+    }
+
+    #[test]
+    fn complete_timer_rejects_mismatched_session_id() {
+        let mut conn = db::open_in_memory().expect("db");
+        start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+
+        let result = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 1,
+            active_session_id: "wrong-id".to_owned(),
+            recovery: None,
+        });
+
+        assert!(result.is_err());
     }
 }
