@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { AppSettings, Task, TaskPriority, TimerMode, TimerSession, TimerState } from "./domain/models";
+import type { AppSettings, Statistics, Task, TaskPriority, TimerMode, TimerSession, TimerState } from "./domain/models";
 import { DEFAULT_SETTINGS, durationSecondsForMode } from "./domain/defaults";
+import { weekBoundaries, weekRange } from "./domain/statistics";
 import { useAppGateway } from "./services/gatewayContext";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -53,13 +54,6 @@ const SIDEBAR_GLASS: React.CSSProperties = {
 // Derived from the shared settings; updated when settings are persisted.
 // Until bootstrap loads persisted settings, the defaults are used.
 const MODE_LABELS: Record<TimerMode, string> = { focus: "专注", short: "短休", long: "长休" };
-
-const WEEK_DATA = [
-  { day:"一", sessions:6 }, { day:"二", sessions:8 },
-  { day:"三", sessions:4 }, { day:"四", sessions:9 },
-  { day:"五", sessions:7 }, { day:"六", sessions:2 },
-  { day:"日", sessions:5 },
-];
 
 // ─── Ocean Video Background ───────────────────────────────────────────────────
 function OceanVideo() {
@@ -950,13 +944,27 @@ function MiniBar({ value, max, color }: { value: number; max: number; color: str
   );
 }
 
-function StatsPanel({ logs, sessionCount }:
-  { logs: SessionLog[]; sessionCount: number }) {
+function StatsPanel({ logs, sessionCount, stats }:
+  { logs: SessionLog[]; sessionCount: number; stats: Statistics | null }) {
 
   const todayMinutes = logs.reduce((s,l) => s+l.duration, 0);
-  const dailyGoal    = 8;
+  const dailyGoal    = stats?.dailyGoal ?? DEFAULT_SETTINGS.dailyGoal;
   const goalProgress = Math.min(1, sessionCount/dailyGoal);
-  const maxBar       = Math.max(...WEEK_DATA.map(d => d.sessions));
+
+  // Real per-day data from the statistics query, aligned Mon..Sun like WEEK_DATA.
+  const weekDays = weekBoundaries();
+  const dayLabel = ["一","二","三","四","五","六","日"];
+  const weekData = weekDays.map((b, i) => {
+    const byDay = stats?.byDay.find(d => d.date === b.date);
+    return { day: dayLabel[i], sessions: byDay?.sessions ?? 0 };
+  });
+  const maxBar = Math.max(1, ...weekData.map(d => d.sessions));
+
+  // Real per-project aggregation, descending by focus seconds.
+  const projects = (stats?.byProject ?? [])
+    .slice()
+    .sort((a, b) => b.focusSeconds - a.focusSeconds);
+  const maxProject = Math.max(1, ...projects.map(p => p.sessions));
 
   return (
     <aside className="right-panel" style={{
@@ -1001,7 +1009,7 @@ function StatsPanel({ logs, sessionCount }:
       <div style={{ padding:"9px 16px" }}>
         <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:8 }}>本周</div>
         <div style={{ display:"flex", gap:3, alignItems:"flex-end", height:44 }}>
-          {WEEK_DATA.map((d, i) => {
+          {weekData.map((d, i) => {
             const isToday = i===(new Date().getDay()+6)%7;
             const h = Math.max(3, Math.round((d.sessions/maxBar)*36));
             return (
@@ -1025,18 +1033,18 @@ function StatsPanel({ logs, sessionCount }:
       {/* Project bars */}
       <div style={{ padding:"9px 16px" }}>
         <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:8 }}>项目</div>
-        {[
-          { name:"后端", sessions:9, color:"rgba(226,239,239,0.85)" },
-          { name:"设计", sessions:4, color:"rgba(195,212,218,0.75)" },
-          { name:"运维", sessions:3, color:"rgba(185,160,170,0.75)" },
-          { name:"文档", sessions:2, color:"rgba(215,228,230,0.45)" },
-        ].map(p => (
-          <div key={p.name} style={{ display:"flex", alignItems:"center", gap:7, marginBottom:6 }}>
-            <span style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, width:24, flexShrink:0 }}>{p.name}</span>
-            <MiniBar value={p.sessions} max={9} color={p.color} />
+        {(projects.length === 0 ? (
+          <div style={{ fontSize:11, color:C.textMuted, fontStyle:"italic", fontFamily:"var(--font-sans)" }}>暂无项目数据</div>
+        ) : projects.map((p, idx) => {
+          const colors = ["rgba(226,239,239,0.85)","rgba(195,212,218,0.75)","rgba(185,160,170,0.75)","rgba(215,228,230,0.45)"];
+          return (
+          <div key={p.project} style={{ display:"flex", alignItems:"center", gap:7, marginBottom:6 }}>
+            <span style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, width:24, flexShrink:0 }}>{p.project}</span>
+            <MiniBar value={p.sessions} max={maxProject} color={colors[idx % colors.length]} />
             <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted, width:10, textAlign:"right", flexShrink:0 }}>{p.sessions}</span>
           </div>
-        ))}
+          );
+        }))}
       </div>
       <HorizonDivider />
 
@@ -1088,14 +1096,14 @@ function StatsPanel({ logs, sessionCount }:
 }
 
 // ─── Week Line Chart ──────────────────────────────────────────────────────────
-function WeekLineChart({ todayIdx }: { todayIdx: number }) {
+function WeekLineChart({ data, todayIdx }: { data: Array<{ day: string; sessions: number }>; todayIdx: number }) {
   const svgW = 220, svgH = 60, padX = 8, padTop = 5, padBottom = 7;
   const chartW = svgW - 2*padX;
   const chartH = svgH - padTop - padBottom;
-  const maxV = Math.max(...WEEK_DATA.map(d => d.sessions));
+  const maxV = Math.max(1, ...data.map(d => d.sessions));
 
-  const pts = WEEK_DATA.map((d, i) => ({
-    x: padX + (i/(WEEK_DATA.length-1))*chartW,
+  const pts = data.map((d, i) => ({
+    x: padX + (i/(data.length-1))*chartW,
     y: padTop + chartH - (d.sessions/maxV)*chartH,
   }));
 
@@ -1125,12 +1133,12 @@ function WeekLineChart({ todayIdx }: { todayIdx: number }) {
         {todayIdx >= 0 && (
           <text x={pts[todayIdx].x} y={pts[todayIdx].y-4} textAnchor="middle"
             style={{ fontSize:6.5, fill:C.silver, fontFamily:"var(--font-mono)" }}>
-            {WEEK_DATA[todayIdx].sessions}
+            {data[todayIdx].sessions}
           </text>
         )}
       </svg>
       <div style={{ display:"flex", marginTop:3 }}>
-        {WEEK_DATA.map((d, i) => (
+        {data.map((d, i) => (
           <div key={i} style={{ flex:1, textAlign:"center", fontFamily:"var(--font-sans)", fontSize:9, color: i===todayIdx ? C.silver : C.textMuted }}>{d.day}</div>
         ))}
       </div>
@@ -1139,10 +1147,27 @@ function WeekLineChart({ todayIdx }: { todayIdx: number }) {
 }
 
 // ─── Stats Full Page ──────────────────────────────────────────────────────────
-function StatsPage({ logs, sessionCount }:
-  { logs: SessionLog[]; sessionCount: number }) {
+function StatsPage({ logs, sessionCount, stats }:
+  { logs: SessionLog[]; sessionCount: number; stats: Statistics | null }) {
 
   const todayIdx = (new Date().getDay()+6)%7;
+
+  const dayLabel = ["一","二","三","四","五","六","日"];
+  const weekDays = weekBoundaries();
+  const weekData = weekDays.map((b, i) => {
+    const byDay = stats?.byDay.find(d => d.date === b.date);
+    return { day: dayLabel[i], sessions: byDay?.sessions ?? 0 };
+  });
+
+  const dayName = ["周日","周一","周二","周三","周四","周五","周六"];
+  const bestDayLabel = stats?.bestDay
+    ? (() => {
+        const b = weekDays.find(d => d.date === stats.bestDay);
+        if (!b) return stats.bestDay;
+        const idx = new Date(b.from).getDay();
+        return dayName[idx];
+      })()
+    : "—";
 
   return (
     <div className="flex flex-col h-full" style={{ overflowY:"auto", position:"relative", zIndex:2 }}>
@@ -1156,9 +1181,9 @@ function StatsPage({ logs, sessionCount }:
       <div style={{ padding:"14px 22px 0", display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))", gap:9 }}>
         {[
           { label:"今日专注", value:sessionCount, unit:"次",  accent:true },
-          { label:"本周专注", value:41,           unit:"次",  accent:false },
-          { label:"连续天数", value:7,             unit:"天",  accent:false },
-          { label:"最佳单日", value:"周四",        unit:"",    accent:false },
+          { label:"本周专注", value:stats?.focusSessionCount ?? 0, unit:"次",  accent:false },
+          { label:"连续天数", value:stats?.streakDays ?? 0, unit:"天",  accent:false },
+          { label:"最佳单日", value:bestDayLabel, unit:"",    accent:false },
         ].map(stat => (
           <div key={stat.label} style={{ padding:"12px 13px", ...CARD, background: stat.accent ? C.cardBright : C.card }}>
             <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:7 }}>{stat.label}</div>
@@ -1172,9 +1197,9 @@ function StatsPage({ logs, sessionCount }:
         <div style={{ padding:"14px 16px", ...CARD }}>
           <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:12 }}>
             <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase" }}>本周每日专注</div>
-            <div style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted }}>均 {(WEEK_DATA.reduce((a,d)=>a+d.sessions,0)/7).toFixed(1)} 次/天</div>
+            <div style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted }}>均 {(weekData.reduce((a,d)=>a+d.sessions,0)/7).toFixed(1)} 次/天</div>
           </div>
-          <WeekLineChart todayIdx={todayIdx} />
+          <WeekLineChart data={weekData} todayIdx={todayIdx} />
         </div>
       </div>
 
@@ -1216,6 +1241,7 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [logs, setLogs]   = useState<SessionLog[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [weekStats, setWeekStats] = useState<Statistics | null>(null);
 
   const activeSettings = settings ?? DEFAULT_SETTINGS;
   const durations = useCallback((mode: TimerMode) => durationSecondsForMode(mode, activeSettings), [activeSettings]);
@@ -1234,6 +1260,17 @@ export default function App() {
       .catch(() => undefined);
     return () => { cancelled = true; };
   }, [gateway]);
+
+  // Fetch this week's statistics whenever tasks/logs/settings change —
+  // effectively after bootstrap and after any logged session.
+  const refreshStats = useCallback(() => {
+    const { from, to } = weekRange();
+    gateway.getStatistics({ from, to, days: weekBoundaries() })
+      .then(stats => { setWeekStats(stats); })
+      .catch(() => undefined);
+  }, [gateway]);
+
+  useEffect(() => { refreshStats(); }, [refreshStats, tasks.length, logs.length]);
 
   const saveSettings = useCallback(async (next: AppSettings) => {
     const result = await gateway.saveSettings(next);
@@ -1286,7 +1323,7 @@ export default function App() {
           onCyclePriority={cyclePriority}
         />
       );
-      case "stats":    return <StatsPage  logs={logs} sessionCount={logs.length} />;
+      case "stats":    return <StatsPage  logs={logs} sessionCount={logs.length} stats={weekStats} />;
       case "settings": return <SettingsPanel settings={settings} onSaveSettings={saveSettings} />;
     }
   })();
@@ -1318,7 +1355,7 @@ export default function App() {
           </div>
         </main>
 
-        {showRight && <StatsPanel logs={logs} sessionCount={logs.length} />}
+        {showRight && <StatsPanel logs={logs} sessionCount={logs.length} stats={weekStats} />}
       </div>
     </div>
   );
