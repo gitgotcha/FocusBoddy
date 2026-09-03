@@ -1,0 +1,10 @@
+{
+  "description": "Enhance productivity with a sleek desktop app featuring a focus timer, task management, and daily statistics, designed for users seeking efficient time management.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

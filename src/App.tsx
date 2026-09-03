@@ -1,0 +1,1228 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+type NavSection   = "timer" | "tasks" | "stats" | "settings";
+type TimerMode    = "focus" | "short" | "long";
+type TimerState   = "idle" | "running" | "paused" | "done";
+type TaskPriority = "high" | "med" | "low";
+
+interface Task {
+  id: string; title: string; done: boolean;
+  pomodoros: number; priority: TaskPriority; project: string;
+}
+interface SessionLog {
+  id: string; time: string; duration: number; task: string;
+}
+
+// ─── Design Tokens ────────────────────────────────────────────────────────────
+// Text is vivid & sharp with text shadows to ensure high legibility on transparent frosted glass.
+const C = {
+  abyss:       "#050709",
+  graphite:    "#0A1117",
+  stormGray:   "#1B252C",
+  silver:      "#B0C0C6",
+  moonlight:   "#E2EFEF",
+  textPrimary: "#FFFFFF",
+  textSec:     "rgba(240, 246, 248, 0.92)",
+  textMuted:   "rgba(195, 212, 218, 0.75)",
+  hairline:    "rgba(215, 228, 230, 0.10)",
+  hairlineStr: "rgba(215, 228, 230, 0.18)",
+  // All card/glass backgrounds are very transparent — ocean surrounds everything
+  card:        "rgba(8, 13, 18, 0.24)",
+  cardBright:  "rgba(10, 15, 20, 0.28)",
+  cardDim:     "rgba(5, 9, 13, 0.20)",
+  glassClear:  "rgba(8, 13, 18, 0.20)",
+  glassTint:   "rgba(14, 22, 30, 0.28)",
+} as const;
+
+// Unified transparent glass card — the ocean is always visible behind it
+const CARD: React.CSSProperties = {
+  background:              C.card,
+  backdropFilter:          "blur(18px)",
+  WebkitBackdropFilter:    "blur(18px)",
+  border:                  `1px solid ${C.hairline}`,
+  borderRadius:            16,
+  boxShadow:               "inset 0 0.5px 0 rgba(215,228,230,0.04), 0 4px 16px rgba(2,3,5,0.16)",
+};
+
+// High-clarity frosted glass recipe for sidebars — ultra transparent, crisp backdrop blur, punchy text contrast
+const SIDEBAR_GLASS: React.CSSProperties = {
+  background:              "rgba(6, 11, 16, 0.25)",
+  backdropFilter:          "blur(32px) saturate(1.1) brightness(0.85)",
+  WebkitBackdropFilter:    "blur(32px) saturate(1.1) brightness(0.85)",
+};
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const DURATIONS: Record<TimerMode, number> = { focus: 25*60, short: 5*60, long: 15*60 };
+const MODE_LABELS: Record<TimerMode, string> = { focus: "专注", short: "短休", long: "长休" };
+
+const SAMPLE_TASKS: Task[] = [
+  { id:"t1", title:"重构身份验证流程",       done:false, pomodoros:3, priority:"high", project:"后端" },
+  { id:"t2", title:"为 API 编写单元测试",     done:false, pomodoros:2, priority:"med",  project:"后端" },
+  { id:"t3", title:"更新设计系统令牌",        done:true,  pomodoros:1, priority:"low",  project:"设计" },
+  { id:"t4", title:"审查 Pull Request #247", done:false, pomodoros:1, priority:"high", project:"运维" },
+  { id:"t5", title:"优化数据库查询",          done:false, pomodoros:4, priority:"med",  project:"后端" },
+  { id:"t6", title:"编写 REST 接口文档",      done:true,  pomodoros:2, priority:"low",  project:"文档" },
+];
+
+const SAMPLE_LOGS: SessionLog[] = [
+  { id:"s1", time:"09:05", duration:25, task:"重构身份验证流程" },
+  { id:"s2", time:"09:35", duration:25, task:"为 API 编写单元测试" },
+  { id:"s3", time:"10:05", duration:25, task:"审查 Pull Request #247" },
+  { id:"s4", time:"10:45", duration:25, task:"重构身份验证流程" },
+  { id:"s5", time:"11:15", duration:25, task:"优化数据库查询" },
+];
+
+const WEEK_DATA = [
+  { day:"一", sessions:6 }, { day:"二", sessions:8 },
+  { day:"三", sessions:4 }, { day:"四", sessions:9 },
+  { day:"五", sessions:7 }, { day:"六", sessions:2 },
+  { day:"日", sessions:5 },
+];
+
+// ─── Ocean Video Background ───────────────────────────────────────────────────
+function OceanVideo() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+
+    // 0.87× — natural deceleration without artificial slow-motion artifacts
+    const applyRate = () => { v.playbackRate = 0.87; };
+    applyRate();
+    v.addEventListener("loadedmetadata", applyRate);
+
+    const onVisibility = () => {
+      if (document.hidden) v.pause();
+      else v.play().catch(() => {});
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (mq.matches) v.pause();
+    const onMq = (e: MediaQueryListEvent) => {
+      if (e.matches) v.pause(); else v.play().catch(() => {});
+    };
+    mq.addEventListener("change", onMq);
+
+    return () => {
+      v.removeEventListener("loadedmetadata", applyRate);
+      document.removeEventListener("visibilitychange", onVisibility);
+      mq.removeEventListener("change", onMq);
+    };
+  }, []);
+
+  return (
+    <>
+      {/* Single global ocean — fixed to viewport, every UI surface floats above it */}
+      <video
+        ref={videoRef}
+        autoPlay muted loop playsInline
+        poster="https://images.pexels.com/videos/4938208/apartment-apartment-building-at-sea-beach-4938208.jpeg?auto=compress&cs=tinysrgb&w=1920&h=1080&dpr=1"
+        style={{
+          position: "fixed", inset: 0,
+          width: "100vw", height: "100vh",
+          objectFit: "cover",
+          zIndex: 0, display: "block",
+          pointerEvents: "none",
+          // D-Log-pressed grade: dark, desaturated, natural contrast
+          filter: "brightness(0.52) saturate(0.44) contrast(0.94)",
+        }}
+      >
+        <source src="https://videos.pexels.com/video-files/4938208/4938208-hd_1920_1080_25fps.mp4" type="video/mp4" />
+        <source src="https://videos.pexels.com/video-files/4938208/4938208-uhd_2560_1440_25fps.mp4" type="video/mp4" />
+        <source src="https://videos.pexels.com/video-files/33191633/14145109_2560_1440_30fps.mp4" type="video/mp4" />
+      </video>
+
+      {/* Single continuous vignette — no section-specific bands */}
+      <div style={{
+        position: "fixed", inset: 0, zIndex: 1, pointerEvents: "none",
+        background: `linear-gradient(
+          180deg,
+          rgba(5,7,9,0.60) 0%,
+          rgba(5,7,9,0.28) 22%,
+          rgba(5,7,9,0.16) 46%,
+          rgba(5,7,9,0.22) 70%,
+          rgba(5,7,9,0.44) 87%,
+          rgba(5,7,9,0.58) 100%
+        )`,
+      }} />
+
+      {/* Radial vignette — corners only */}
+      <div style={{
+        position: "fixed", inset: 0, zIndex: 1, pointerEvents: "none",
+        background: "radial-gradient(ellipse 88% 86% at 50% 48%, transparent 28%, rgba(5,7,9,0.48) 100%)",
+      }} />
+    </>
+  );
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function pad(n: number) { return String(n).padStart(2, "0"); }
+function formatSeconds(s: number) { return { m: pad(Math.floor(s/60)), s: pad(s%60) }; }
+function uid() { return Math.random().toString(36).slice(2,9); }
+function chineseDate() {
+  const d = new Date();
+  const wd = ["周日","周一","周二","周三","周四","周五","周六"];
+  return `${d.getMonth()+1}月${d.getDate()}日 · ${wd[d.getDay()]}`;
+}
+
+function catmullRomPath(pts: { x: number; y: number }[], tension = 0.38): string {
+  if (pts.length < 2) return "";
+  let d = `M ${pts[0].x.toFixed(2)},${pts[0].y.toFixed(2)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i-1)];
+    const p1 = pts[i];
+    const p2 = pts[i+1];
+    const p3 = pts[Math.min(pts.length-1, i+2)];
+    const cp1x = p1.x + (p2.x - p0.x) * tension;
+    const cp1y = p1.y + (p2.y - p0.y) * tension;
+    const cp2x = p2.x - (p3.x - p1.x) * tension;
+    const cp2y = p2.y - (p3.y - p1.y) * tension;
+    d += ` C ${cp1x.toFixed(2)},${cp1y.toFixed(2)} ${cp2x.toFixed(2)},${cp2y.toFixed(2)} ${p2.x.toFixed(2)},${p2.y.toFixed(2)}`;
+  }
+  return d;
+}
+
+function HorizonDivider() {
+  return (
+    <div style={{
+      height: 1, flexShrink: 0,
+      background: `linear-gradient(90deg, transparent 0%, rgba(215,228,230,0.04) 15%, rgba(215,228,230,0.07) 40%, rgba(215,228,230,0.08) 52%, rgba(215,228,230,0.05) 78%, rgba(215,228,230,0.02) 90%, transparent 100%)`,
+    }} />
+  );
+}
+
+function GoalRing({ progress, size = 36 }: { progress: number; size?: number }) {
+  const r = size/2 - 3;
+  const circ = 2 * Math.PI * r;
+  const offset = circ * (1 - Math.min(1, progress));
+  return (
+    <svg width={size} height={size} style={{ transform:"rotate(-90deg)", flexShrink:0 }}>
+      <defs>
+        <linearGradient id="goalGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#9EADB2" />
+          <stop offset="100%" stopColor="#BAC8CC" />
+        </linearGradient>
+      </defs>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(215,228,230,0.08)" strokeWidth={2} />
+      <circle cx={size/2} cy={size/2} r={r} fill="none"
+        stroke="url(#goalGrad)" strokeWidth={2}
+        strokeDasharray={circ} strokeDashoffset={offset}
+        strokeLinecap="round"
+        style={{ transition:"stroke-dashoffset 0.9s cubic-bezier(0.22,1,0.36,1)" }}
+      />
+    </svg>
+  );
+}
+
+// ─── Sidebar ──────────────────────────────────────────────────────────────────
+const NAV_ITEMS: { id: NavSection; label: string; icon: React.JSX.Element }[] = [
+  {
+    id:"timer", label:"计时",
+    icon:(
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <circle cx="8" cy="8.5" r="5.8" stroke="currentColor" strokeWidth="1.2" />
+        <path d="M8 5.5V8.5L10 10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        <path d="M6.5 1.5H9.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
+    id:"tasks", label:"任务",
+    icon:(
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <path d="M3 4H13M3 8H10M3 12H8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
+    id:"stats", label:"统计",
+    icon:(
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <rect x="2" y="9" width="3" height="5" rx="0.6" stroke="currentColor" strokeWidth="1.2" />
+        <rect x="6.5" y="5" width="3" height="9" rx="0.6" stroke="currentColor" strokeWidth="1.2" />
+        <rect x="11" y="2" width="3" height="12" rx="0.6" stroke="currentColor" strokeWidth="1.2" />
+      </svg>
+    ),
+  },
+  {
+    id:"settings", label:"设置",
+    icon:(
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.2" />
+        <path d="M8 1.5V3M8 13V14.5M14.5 8H13M3 8H1.5M12.36 3.64L11.3 4.7M4.7 11.3L3.64 12.36M12.36 12.36L11.3 11.3M4.7 4.7L3.64 3.64"
+          stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+];
+
+function Sidebar({ active, onNav }: { active: NavSection; onNav: (s: NavSection) => void }) {
+  return (
+    <aside className="nav-sidebar" style={{
+      width: 56, flexShrink: 0, zIndex: 10, position: "relative",
+      display: "flex", flexDirection: "column", alignItems: "center",
+      padding: "14px 0",
+      ...SIDEBAR_GLASS,
+      borderRight: `1px solid ${C.hairline}`,
+      boxShadow: "inset -1px 0 0 rgba(255,255,255,0.025), 6px 0 24px rgba(0,0,0,0.12)",
+    }}>
+      {/* Logo mark */}
+      <div style={{
+        width: 28, height: 28, borderRadius: "50%",
+        background: "rgba(14, 20, 26, 0.35)",
+        border: `0.5px solid rgba(215,228,230,0.14)`,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        marginBottom: 16,
+      }}>
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+          <circle cx="7" cy="7" r="2.6" stroke="rgba(226,239,239,0.85)" strokeWidth="1.2" />
+          <circle cx="7" cy="7" r="5.5" stroke="rgba(226,239,239,0.22)" strokeWidth="0.8" />
+        </svg>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {NAV_ITEMS.map((item) => {
+          const isActive = active === item.id;
+          return (
+            <button key={item.id} onClick={() => onNav(item.id)} title={item.label}
+              className="nav-btn"
+              style={{
+                width: 36, height: 36, borderRadius: 10,
+                background: isActive ? "rgba(255,255,255,0.12)" : "transparent",
+                color: isActive ? "#FFFFFF" : "rgba(220, 232, 236, 0.70)",
+                border: `0.5px solid ${isActive ? "rgba(255,255,255,0.22)" : "transparent"}`,
+                cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                outline: "none",
+                textShadow: isActive ? "0 1px 4px rgba(0,0,0,0.5)" : "none",
+              }}>
+              {item.icon}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ marginTop: "auto" }}>
+        <div style={{
+          width: 26, height: 26, borderRadius: "50%",
+          background: "rgba(255,255,255,0.08)",
+          border: `0.5px solid ${C.hairlineStr}`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 9, fontWeight: 600, color: "#FFFFFF", fontFamily: "var(--font-sans)",
+          textShadow: "0 1px 3px rgba(0,0,0,0.6)",
+        }}>AK</div>
+      </div>
+    </aside>
+  );
+}
+
+// ─── Timer Arc ────────────────────────────────────────────────────────────────
+function TimerArc({ progress, mode, isRunning, isDone }:
+  { progress: number; mode: TimerMode; isRunning: boolean; isDone: boolean }) {
+
+  const SZ = 290; const r = 115; const cx = SZ/2; const cy = SZ/2;
+  const circ = 2 * Math.PI * r;
+  const offset = circ * (1 - progress);
+  const angle = progress * 2 * Math.PI;
+  const dotX = cx + r * Math.cos(angle - Math.PI/2);
+  const dotY = cy + r * Math.sin(angle - Math.PI/2);
+
+  const gradId = mode === "focus" ? "tgF" : mode === "short" ? "tgS" : "tgL";
+  const dotColor = mode === "focus" ? C.moonlight : mode === "short" ? C.silver : "rgba(175,148,158,0.88)";
+
+  return (
+    <svg width={SZ} height={SZ} style={{ overflow: "visible" }}>
+      <defs>
+        <linearGradient id="tgF" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#9EADB2" /><stop offset="100%" stopColor="#BAC8CC" />
+        </linearGradient>
+        <linearGradient id="tgS" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#BAC8CC" /><stop offset="100%" stopColor="rgba(186,200,204,0.42)" />
+        </linearGradient>
+        <linearGradient id="tgL" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="rgba(175,148,158,0.88)" /><stop offset="100%" stopColor="rgba(175,148,158,0.40)" />
+        </linearGradient>
+        <filter id="arcGlow" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="3.5" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="dotGlow" x="-200%" y="-200%" width="500%" height="500%">
+          <feGaussianBlur stdDeviation="3.5" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+
+      <circle cx={cx} cy={cy} r={r+17} fill="none" stroke="rgba(158,173,178,0.012)" strokeWidth={0.7} />
+      <circle cx={cx} cy={cy} r={r+10} fill="none" stroke="rgba(158,173,178,0.020)" strokeWidth={0.7} />
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="rgba(215,228,230,0.06)" strokeWidth={4.5}
+        transform={`rotate(-90 ${cx} ${cy})`} />
+      <circle cx={cx} cy={cy} r={r-10} fill="none" stroke="rgba(158,173,178,0.016)" strokeWidth={0.6} />
+      <circle cx={cx} cy={cy} r={r} fill="none"
+        stroke={`url(#${gradId})`} strokeWidth={4.5}
+        strokeDasharray={circ} strokeDashoffset={offset}
+        strokeLinecap="round"
+        filter={isRunning ? "url(#arcGlow)" : undefined}
+        transform={`rotate(-90 ${cx} ${cy})`}
+        style={{ transition: "stroke-dashoffset 1s linear" }}
+      />
+      {progress > 0.03 && (
+        <circle cx={cx} cy={cy} r={r} fill="none"
+          stroke="rgba(235,240,241,0.12)" strokeWidth={1.8}
+          strokeDasharray={`${circ*0.05} ${circ*0.95}`}
+          strokeDashoffset={offset + circ*0.032}
+          strokeLinecap="round"
+          transform={`rotate(-90 ${cx} ${cy})`}
+          opacity={isRunning ? 0.46 : 0.14}
+          style={{ transition: "stroke-dashoffset 1s linear, opacity 0.6s" }}
+        />
+      )}
+      {progress > 0.02 && progress < 0.995 && (
+        <circle cx={dotX} cy={dotY} r={3.4}
+          fill={dotColor} filter="url(#dotGlow)"
+          opacity={isRunning ? 0.78 : 0.26}
+          style={{ transition: "opacity 0.6s" }}
+        />
+      )}
+      {!isRunning && !isDone && (
+        <circle cx={cx} cy={cy} r={r+17} fill="none"
+          stroke="rgba(158,173,178,0.04)" strokeWidth={0.8}
+          className="timer-pulse" />
+      )}
+      {isDone && (<>
+        <circle cx={cx} cy={cy} r={r+12} fill="none"
+          stroke="rgba(158,173,178,0.20)" strokeWidth={1.0}
+          className="done-ripple-1" />
+        <circle cx={cx} cy={cy} r={r+30} fill="none"
+          stroke="rgba(186,200,204,0.09)" strokeWidth={0.7}
+          className="done-ripple-2" />
+      </>)}
+    </svg>
+  );
+}
+
+// ─── Timer Panel ──────────────────────────────────────────────────────────────
+function TimerPanel({ tasks, onLogSession }:
+  { tasks: Task[]; onLogSession: (task: string, duration: number) => void }) {
+
+  const [mode, setMode]             = useState<TimerMode>("focus");
+  const [state, setState]           = useState<TimerState>("idle");
+  const [remaining, setRemaining]   = useState(DURATIONS.focus);
+  const [selectedTask, setSelected] = useState(tasks[0]?.id ?? "");
+  const [sessions, setSessions]     = useState(0);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const total    = DURATIONS[mode];
+  const progress = remaining / total;
+
+  const clearTimer = useCallback(() => {
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+  }, []);
+
+  const handleStart = () => { if (state === "done") setRemaining(DURATIONS[mode]); setState("running"); };
+  const handlePause = () => setState("paused");
+  const handleReset = () => { clearTimer(); setState("idle"); setRemaining(DURATIONS[mode]); };
+  const switchMode  = (m: TimerMode) => { clearTimer(); setState("idle"); setMode(m); setRemaining(DURATIONS[m]); };
+
+  useEffect(() => {
+    if (state === "running") {
+      intervalRef.current = setInterval(() => {
+        setRemaining(r => {
+          if (r <= 1) {
+            clearTimer(); setState("done"); setSessions(s => s+1);
+            const task = tasks.find(t => t.id === selectedTask);
+            onLogSession(task?.title ?? "未命名任务", DURATIONS[mode]/60);
+            return 0;
+          }
+          return r - 1;
+        });
+      }, 1000);
+    } else {
+      clearTimer();
+    }
+    return clearTimer;
+  }, [state, mode, selectedTask, tasks, onLogSession, clearTimer]);
+
+  const { m, s } = formatSeconds(remaining);
+  const activeTasks = tasks.filter(t => !t.done);
+
+  const statusText = () => {
+    if (state === "done")    return "已完成";
+    if (state === "idle")    return MODE_LABELS[mode];
+    if (state === "running") return "专注中";
+    return "已暂停";
+  };
+
+  const ctrlBtn: React.CSSProperties = {
+    width: 42, height: 42, borderRadius: "50%",
+    background: C.glassClear,
+    backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
+    border: `1px solid ${C.hairline}`,
+    color: C.textMuted, cursor: "pointer",
+    display: "flex", alignItems: "center", justifyContent: "center", outline: "none",
+  };
+
+  return (
+    <div className="flex flex-col h-full overflow-y-auto" style={{ position: "relative", zIndex: 2 }}>
+
+      {/* Mode bar */}
+      <div style={{ flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 22px" }}>
+          {(["focus","short","long"] as TimerMode[]).map(md => (
+            <button key={md} onClick={() => switchMode(md)} className="btn-mode"
+              style={{
+                fontFamily: "var(--font-sans)", fontSize: 12,
+                fontWeight: mode === md ? 500 : 400,
+                padding: "4px 13px", borderRadius: 20,
+                border: `0.5px solid ${mode === md ? C.hairlineStr : "transparent"}`,
+                background: mode === md ? "rgba(27,37,44,0.38)" : "transparent",
+                color: mode === md ? C.moonlight : C.textMuted,
+                cursor: "pointer", outline: "none",
+              }}>
+              {MODE_LABELS[md]}
+            </button>
+          ))}
+          <div style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 10, color: C.textMuted, letterSpacing: "0.05em" }}>
+            {sessions} 次
+          </div>
+        </div>
+        <HorizonDivider />
+      </div>
+
+      {/* Arc + controls + task selector — centred in the main column */}
+      <div style={{
+        display: "flex", flexDirection: "column", alignItems: "center",
+        justifyContent: "center", flex: 1,
+        gap: 14, padding: "10px 22px 14px",
+        minHeight: 0,
+      }}>
+
+        {/* Arc */}
+        <div className="su-1 surface-up" style={{ position: "relative", width: 290, height: 290, flexShrink: 0 }}>
+          <div style={{
+            position: "absolute", width: 310, height: 310, top: -10, left: -10,
+            borderRadius: "50%",
+            background: "radial-gradient(circle, rgba(14,22,30,0.14) 0%, transparent 65%)",
+            filter: "blur(32px)", pointerEvents: "none",
+          }} />
+          <TimerArc progress={progress} mode={mode}
+            isRunning={state === "running"} isDone={state === "done"} />
+          <div style={{
+            position: "absolute", inset: 0,
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+            gap: 5,
+          }}>
+            <div style={{
+              position: "absolute", width: 188, height: 188, borderRadius: "50%",
+              background: "radial-gradient(ellipse 55% 42% at 40% 34%, rgba(215,228,230,0.015) 0%, rgba(14,22,30,0.022) 55%, transparent 80%)",
+              backdropFilter: "blur(2px)", WebkitBackdropFilter: "blur(2px)",
+              border: "0.5px solid rgba(215,228,230,0.036)",
+              pointerEvents: "none",
+            }} />
+            <div style={{
+              fontFamily: "var(--font-display)", fontVariantNumeric: "tabular-nums",
+              fontSize: 60, fontWeight: 300, letterSpacing: "-0.026em", lineHeight: 1,
+              color: state === "done" ? C.moonlight : C.textPrimary,
+              transition: "color 0.5s",
+              textShadow: state === "running" ? "0 0 28px rgba(158,173,178,0.10)" : "none",
+              position: "relative", zIndex: 1,
+            }}>
+              {m}<span className={state === "running" ? "colon-blink" : ""}>:</span>{s}
+            </div>
+            <div style={{
+              fontFamily: "var(--font-sans)", fontSize: 10, letterSpacing: "0.12em",
+              color: state === "done" ? "rgba(186,200,204,0.58)" : C.textMuted,
+              transition: "color 0.4s", position: "relative", zIndex: 1,
+            }}>
+              {statusText()}
+            </div>
+          </div>
+        </div>
+
+        {/* Controls */}
+        <div className="su-2 surface-up" style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <button onClick={handleReset} title="重置" className="btn-ctrl" style={ctrlBtn}>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M2 7a5 5 0 1 0 1-3H1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              <path d="M1 4V7H4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+
+          {state === "running" ? (
+            <button onClick={handlePause} className="btn-main"
+              style={{
+                width: 68, height: 68, borderRadius: "50%",
+                background: C.glassTint,
+                backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
+                border: `1px solid rgba(215,228,230,0.12)`,
+                boxShadow: "inset 0 1px 0 rgba(215,228,230,0.07), 0 0 18px rgba(158,173,178,0.06), 0 4px 16px rgba(2,3,5,0.28)",
+                color: C.moonlight, cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center", outline: "none",
+              }}>
+              <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                <rect x="4" y="3" width="3.5" height="12" rx="1.2" fill="currentColor" />
+                <rect x="10.5" y="3" width="3.5" height="12" rx="1.2" fill="currentColor" />
+              </svg>
+            </button>
+          ) : (
+            <button onClick={handleStart} className="btn-main"
+              style={{
+                width: 68, height: 68, borderRadius: "50%",
+                background: state === "done" ? "rgba(27,37,44,0.38)" : "rgba(158,173,178,0.06)",
+                backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
+                border: `1px solid rgba(215,228,230,0.12)`,
+                boxShadow: "inset 0 1px 0 rgba(215,228,230,0.07), 0 0 22px rgba(158,173,178,0.08), 0 4px 16px rgba(2,3,5,0.28)",
+                color: C.moonlight, cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center", outline: "none",
+              }}>
+              {state === "done" ? (
+                <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                  <path d="M3 9a6 6 0 1 0 1.5-4H3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                  <path d="M3 5V9H7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                  <path d="M6.5 4L14.5 9L6.5 14V4Z" fill="currentColor" />
+                </svg>
+              )}
+            </button>
+          )}
+
+          <button title="切换模式" className="btn-ctrl"
+            onClick={() => { const ms = ["focus","short","long"] as TimerMode[]; switchMode(ms[(ms.indexOf(mode)+1)%3]); }}
+            style={ctrlBtn}>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M3 7H11M8 4L11 7L8 10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Task selector */}
+        <div className="su-3 surface-up" style={{ width: "min(76%, 520px)", minWidth: 280 }}>
+          <HorizonDivider />
+          <div style={{ paddingTop: 9 }}>
+            <div style={{
+              fontFamily: "var(--font-sans)", fontSize: 10,
+              letterSpacing: "0.10em", color: C.textMuted, marginBottom: 7,
+              textTransform: "uppercase",
+            }}>当前任务</div>
+            {activeTasks.length === 0 ? (
+              <div style={{ padding: "9px 12px", ...CARD, color: C.textMuted, fontSize: 11, fontFamily: "var(--font-sans)", fontStyle: "italic" }}>
+                暂无任务，前往任务面板添加
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 148, overflowY: "auto" }}>
+                {activeTasks.map(task => {
+                  const sel = selectedTask === task.id;
+                  return (
+                    <button key={task.id} onClick={() => setSelected(task.id)}
+                      className="task-sel-item"
+                      style={{
+                        position: "relative", overflow: "hidden",
+                        padding: "8px 12px",
+                        ...CARD,
+                        background: sel ? "rgba(27,37,44,0.40)" : C.cardDim,
+                        border: `1px solid ${sel ? C.hairlineStr : C.hairline}`,
+                        color: sel ? C.moonlight : C.textSec,
+                        fontSize: 12, fontFamily: "var(--font-sans)",
+                        textAlign: "left", cursor: "pointer", outline: "none",
+                        display: "flex", alignItems: "center", gap: 7,
+                      }}>
+                      {sel && (
+                        <div style={{
+                          position: "absolute", left: 0, top: 0, bottom: 0, width: 2,
+                          background: `linear-gradient(to bottom, transparent 0%, ${C.silver} 30%, ${C.moonlight} 55%, ${C.silver} 78%, transparent 100%)`,
+                        }} />
+                      )}
+                      {sel && (
+                        <svg width="5" height="5" viewBox="0 0 6 6" style={{ flexShrink: 0 }}>
+                          <circle cx="3" cy="3" r="2.4" fill={C.silver} className="breathe" />
+                        </svg>
+                      )}
+                      <span style={{ flex: 1, lineHeight: 1.4 }}>{task.title}</span>
+                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: C.textMuted, flexShrink: 0 }}>×{task.pomodoros}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Tasks Panel ──────────────────────────────────────────────────────────────
+function PriorityPip({ p }: { p: TaskPriority }) {
+  const colors: Record<TaskPriority, string> = {
+    high: "rgba(190,120,120,0.80)", med: "rgba(170,145,108,0.80)", low: "rgba(158,173,178,0.70)",
+  };
+  return <span style={{ width: 5, height: 5, borderRadius: "50%", background: colors[p], display: "inline-block", flexShrink: 0 }} />;
+}
+
+function TasksPanel({ tasks, setTasks }:
+  { tasks: Task[]; setTasks: React.Dispatch<React.SetStateAction<Task[]>> }) {
+
+  const [newTitle, setNewTitle] = useState("");
+  const [filter, setFilter]    = useState<"all"|"active"|"done">("all");
+
+  const addTask = () => {
+    const title = newTitle.trim(); if (!title) return;
+    setTasks(p => [{ id:uid(), title, done:false, pomodoros:1, priority:"med", project:"通用" }, ...p]);
+    setNewTitle("");
+  };
+  const toggleTask    = (id: string) => setTasks(p => p.map(t => t.id===id ? {...t,done:!t.done} : t));
+  const deleteTask    = (id: string) => setTasks(p => p.filter(t => t.id!==id));
+  const cyclePriority = (id: string) => {
+    const cycle: TaskPriority[] = ["low","med","high"];
+    setTasks(p => p.map(t => t.id===id ? {...t, priority:cycle[(cycle.indexOf(t.priority)+1)%3]} : t));
+  };
+
+  const filtered = tasks.filter(t => filter==="all" ? true : filter==="active" ? !t.done : t.done);
+  const fLabels = { all:"全部", active:"进行中", done:"已完成" } as const;
+
+  return (
+    <div className="flex flex-col h-full" style={{ position: "relative", zIndex: 2 }}>
+      <div style={{ flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 22px" }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: C.textPrimary, fontFamily: "var(--font-sans)" }}>任务</span>
+          <span style={{
+            fontFamily: "var(--font-mono)", fontSize: 10, color: C.textMuted,
+            background: C.cardDim, border: `1px solid ${C.hairline}`,
+            borderRadius: 5, padding: "2px 6px",
+          }}>{tasks.filter(t=>!t.done).length}</span>
+          <div style={{ marginLeft: "auto", display: "flex", gap: 3 }}>
+            {(["all","active","done"] as const).map(f => (
+              <button key={f} onClick={() => setFilter(f)} className="btn-filter"
+                style={{
+                  fontFamily: "var(--font-sans)", fontSize: 11,
+                  padding: "3px 9px", borderRadius: 6,
+                  border: `0.5px solid ${filter===f ? C.hairlineStr : "transparent"}`,
+                  background: filter===f ? "rgba(27,37,44,0.38)" : "transparent",
+                  color: filter===f ? C.moonlight : C.textMuted,
+                  cursor: "pointer", outline: "none",
+                }}>{fLabels[f]}</button>
+            ))}
+          </div>
+        </div>
+        <HorizonDivider />
+      </div>
+
+      <div style={{ flexShrink: 0 }}>
+        <div style={{ display: "flex", gap: 7, padding: "9px 22px" }}>
+          <input
+            value={newTitle} onChange={e => setNewTitle(e.target.value)}
+            onKeyDown={e => e.key==="Enter" && addTask()}
+            placeholder="添加任务…" className="input-ocean"
+            style={{ flex: 1, ...CARD, borderRadius: 10, padding: "8px 12px", fontSize: 12, color: C.textPrimary, fontFamily: "var(--font-sans)" }}
+          />
+          <button onClick={addTask} className="btn-add"
+            style={{
+              width: 34, height: 34, borderRadius: 9, flexShrink: 0,
+              background: "rgba(27,37,44,0.36)",
+              backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
+              border: `1px solid ${C.hairlineStr}`,
+              color: C.moonlight, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", outline: "none",
+            }}>
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+              <path d="M7 2V12M2 7H12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+        <HorizonDivider />
+      </div>
+
+      <div className="flex-1 overflow-y-auto" style={{ padding: "6px 22px" }}>
+        {filtered.length === 0 ? (
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100%", gap:8, opacity:0.24, paddingBottom:40 }}>
+            <svg width="24" height="24" viewBox="0 0 30 30" fill="none">
+              <rect x="3" y="7" width="24" height="2" rx="1" fill={C.silver} />
+              <rect x="3" y="14" width="17" height="2" rx="1" fill={C.silver} />
+              <rect x="3" y="21" width="11" height="2" rx="1" fill={C.silver} />
+            </svg>
+            <span style={{ fontSize:11, color:C.textSec, fontFamily:"var(--font-sans)" }}>
+              {filter==="done" ? "尚无已完成任务" : "暂无任务"}
+            </span>
+          </div>
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", gap:5, paddingTop:7, paddingBottom:7 }}>
+            {filtered.map(task => (
+              <div key={task.id} className="slide-in task-item"
+                style={{ display:"flex", alignItems:"center", gap:9, padding:"9px 12px", ...CARD }}>
+                <button onClick={() => toggleTask(task.id)} className="btn-check"
+                  style={{
+                    width:15, height:15, borderRadius:5, flexShrink:0,
+                    border:`1.5px solid ${task.done ? C.silver : "rgba(215,228,230,0.14)"}`,
+                    background: task.done ? "rgba(158,173,178,0.10)" : "transparent",
+                    cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", outline:"none",
+                  }}>
+                  {task.done && (
+                    <svg width="7" height="7" viewBox="0 0 9 9" fill="none">
+                      <path d="M1.5 4.5L3.5 6.5L7.5 2.5" stroke={C.silver} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                </button>
+                <button onClick={() => cyclePriority(task.id)}
+                  style={{ background:"none", border:"none", cursor:"pointer", padding:0, display:"flex" }}>
+                  <PriorityPip p={task.priority} />
+                </button>
+                <span style={{
+                  flex:1, fontSize:12, fontFamily:"var(--font-sans)", lineHeight:1.4,
+                  color: task.done ? "rgba(165,182,188,0.26)" : C.textSec,
+                  textDecoration: task.done ? "line-through" : "none",
+                  textDecorationColor: "rgba(165,182,188,0.26)",
+                  transition: "all 0.22s",
+                }}>{task.title}</span>
+                <span style={{
+                  fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted,
+                  background:"rgba(27,37,44,0.26)", border:`1px solid ${C.hairline}`,
+                  padding:"1px 5px", borderRadius:4, flexShrink:0,
+                }}>{task.project}</span>
+                <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted }}>×{task.pomodoros}</span>
+                <button onClick={() => deleteTask(task.id)} className="btn-delete"
+                  style={{
+                    width:20, height:20, borderRadius:4, flexShrink:0,
+                    background:"none", border:"1px solid transparent",
+                    color:"rgba(215,228,230,0.14)", cursor:"pointer",
+                    display:"flex", alignItems:"center", justifyContent:"center", outline:"none",
+                  }}>
+                  <svg width="8" height="8" viewBox="0 0 10 10" fill="none">
+                    <path d="M2 2L8 8M8 2L2 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Settings Panel ───────────────────────────────────────────────────────────
+function SettingsPanel() {
+  const [focusDur, setFocusDur]   = useState(25);
+  const [shortDur, setShortDur]   = useState(5);
+  const [longDur, setLongDur]     = useState(15);
+  const [autoStart, setAutoStart] = useState(false);
+  const [sound, setSound]         = useState(true);
+  const [notif, setNotif]         = useState(true);
+  const [dailyGoal, setDailyGoal] = useState(8);
+
+  const Toggle = ({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) => (
+    <button onClick={() => onChange(!value)} className="btn-toggle"
+      role="switch" aria-checked={value}
+      style={{
+        width:34, height:19, borderRadius:10, flexShrink:0,
+        background: value ? "rgba(27,37,44,0.50)" : "rgba(8,13,18,0.24)",
+        border:`1px solid ${value ? C.hairlineStr : C.hairline}`,
+        position:"relative", cursor:"pointer", outline:"none",
+      }}>
+      <span style={{
+        position:"absolute", top:3, left: value ? 16 : 3,
+        width:11, height:11, borderRadius:"50%",
+        background: value ? C.silver : "rgba(215,228,230,0.18)",
+        transition:"all 0.24s cubic-bezier(0.22,1,0.36,1)",
+      }} />
+    </button>
+  );
+
+  const Stepper = ({ value, onChange, min, max }:
+    { value: number; onChange: (v: number) => void; min: number; max: number }) => (
+    <div style={{ display:"flex", alignItems:"center", gap:5 }}>
+      <button onClick={() => onChange(Math.max(min, value-1))} className="btn-number"
+        style={{
+          width:24, height:24, borderRadius:6,
+          background:C.cardDim, border:`1px solid ${C.hairline}`,
+          color:C.textSec, cursor:"pointer", fontSize:13,
+          display:"flex", alignItems:"center", justifyContent:"center", outline:"none",
+        }}>–</button>
+      <span style={{ width:30, textAlign:"center", fontFamily:"var(--font-mono)", fontSize:12, fontVariantNumeric:"tabular-nums", color:C.textPrimary }}>{value}</span>
+      <button onClick={() => onChange(Math.min(max, value+1))} className="btn-number"
+        style={{
+          width:24, height:24, borderRadius:6,
+          background:C.cardDim, border:`1px solid ${C.hairline}`,
+          color:C.textSec, cursor:"pointer", fontSize:13,
+          display:"flex", alignItems:"center", justifyContent:"center", outline:"none",
+        }}>+</button>
+    </div>
+  );
+
+  const Section = ({ label, children }: { label: string; children: React.ReactNode }) => (
+    <div style={{ marginBottom:9 }}>
+      <div style={{ fontFamily:"var(--font-sans)", fontSize:9, letterSpacing:"0.13em", color:"rgba(165,182,188,0.40)", padding:"12px 0 6px", textTransform:"uppercase" }}>{label}</div>
+      <div style={{ ...CARD, overflow:"hidden" }}>{children}</div>
+    </div>
+  );
+
+  const Row = ({ label, hint, last, children }: { label:string; hint?:string; last?:boolean; children:React.ReactNode }) => (
+    <div style={{
+      display:"flex", alignItems:"center", padding:"11px 13px",
+      borderBottom: last ? "none" : `0.5px solid rgba(215,228,230,0.05)`,
+    }}>
+      <div style={{ flex:1 }}>
+        <div style={{ fontSize:12, color:C.textSec, fontFamily:"var(--font-sans)" }}>{label}</div>
+        {hint && <div style={{ fontSize:10, color:C.textMuted, marginTop:2, fontFamily:"var(--font-sans)" }}>{hint}</div>}
+      </div>
+      {children}
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col h-full" style={{ position:"relative", zIndex:2 }}>
+      <div style={{ flexShrink:0 }}>
+        <div style={{ padding:"10px 22px" }}>
+          <span style={{ fontSize:13, fontWeight:500, color:C.textPrimary, fontFamily:"var(--font-sans)" }}>设置</span>
+        </div>
+        <HorizonDivider />
+      </div>
+      <div className="flex-1 overflow-y-auto" style={{ padding:"4px 22px" }}>
+        <Section label="时长（分钟）">
+          <Row label="专注"><Stepper value={focusDur} onChange={setFocusDur} min={5} max={90} /></Row>
+          <Row label="短休"><Stepper value={shortDur} onChange={setShortDur} min={1} max={30} /></Row>
+          <Row label="长休" last><Stepper value={longDur} onChange={setLongDur} min={5} max={60} /></Row>
+        </Section>
+        <Section label="行为">
+          <Row label="自动开始休息" hint="专注结束后自动继续"><Toggle value={autoStart} onChange={setAutoStart} /></Row>
+          <Row label="声音提示"><Toggle value={sound} onChange={setSound} /></Row>
+          <Row label="桌面通知" last><Toggle value={notif} onChange={setNotif} /></Row>
+        </Section>
+        <Section label="目标">
+          <Row label="每日专注次数" last><Stepper value={dailyGoal} onChange={setDailyGoal} min={1} max={20} /></Row>
+        </Section>
+        <div style={{ ...CARD, borderRadius:12, padding:"11px 13px", marginBottom:20 }}>
+          <div style={{ fontSize:9, color:"rgba(165,182,188,0.34)", marginBottom:4, fontFamily:"var(--font-sans)", letterSpacing:"0.10em", textTransform:"uppercase" }}>关于</div>
+          <div style={{ fontSize:12, color:C.textSec, fontFamily:"var(--font-sans)" }}>深海专注 · 桌面计时器</div>
+          <div style={{ fontSize:10, color:C.textMuted, marginTop:2, fontFamily:"var(--font-mono)", letterSpacing:"0.04em" }}>v0.9.2 · 2026</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Stats Sidebar — transparent frosted glass, content flat on surface ───────
+function MiniBar({ value, max, color }: { value: number; max: number; color: string }) {
+  return (
+    <div style={{ flex:1, height:2, background:"rgba(215,228,230,0.06)", borderRadius:2, overflow:"hidden" }}>
+      <div style={{ width:`${Math.round((value/max)*100)}%`, height:"100%", background:color, borderRadius:2, transition:"width 0.8s cubic-bezier(0.22,1,0.36,1)" }} />
+    </div>
+  );
+}
+
+function StatsPanel({ logs, sessionCount }:
+  { logs: SessionLog[]; sessionCount: number }) {
+
+  const todayMinutes = logs.reduce((s,l) => s+l.duration, 0);
+  const dailyGoal    = 8;
+  const goalProgress = Math.min(1, sessionCount/dailyGoal);
+  const maxBar       = Math.max(...WEEK_DATA.map(d => d.sessions));
+
+  return (
+    <aside className="right-panel" style={{
+      // Width: clamp(240px, 18vw, 320px)
+      position: "relative", zIndex: 2,
+      ...SIDEBAR_GLASS,
+      borderLeft: `1px solid ${C.hairline}`,
+      boxShadow: "inset 1px 0 0 rgba(255,255,255,0.025), -12px 0 36px rgba(0,0,0,0.12)",
+      overflowY: "auto",
+      display: "flex", flexDirection: "column",
+    }}>
+
+      <div style={{ flexShrink: 0 }}>
+        <div style={{ padding:"11px 16px 8px" }}>
+          <div style={{ fontSize:12, fontWeight:600, color:"#FFFFFF", fontFamily:"var(--font-sans)", textShadow:"0 1px 4px rgba(0,0,0,0.5)" }}>今日概览</div>
+          <div style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted, marginTop:2, letterSpacing:"0.03em" }}>{chineseDate()}</div>
+        </div>
+        <HorizonDivider />
+      </div>
+
+      {/* Metrics — directly on glass, no card */}
+      <div style={{ padding:"9px 16px", display:"flex", alignItems:"center", gap:10 }}>
+        <GoalRing progress={goalProgress} size={36} />
+        <div>
+          <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:3 }}>专注</div>
+          <div style={{ display:"flex", alignItems:"baseline", gap:3 }}>
+            <span style={{ fontFamily:"var(--font-display)", fontVariantNumeric:"tabular-nums", fontSize:22, fontWeight:400, color:"#FFFFFF", lineHeight:1, textShadow:"0 1px 6px rgba(0,0,0,0.5)" }}>{sessionCount}</span>
+            <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted }}>/ {dailyGoal}</span>
+          </div>
+        </div>
+        <div style={{ marginLeft:"auto" }}>
+          <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:3 }}>时长</div>
+          <div style={{ display:"flex", alignItems:"baseline", gap:2 }}>
+            <span style={{ fontFamily:"var(--font-display)", fontVariantNumeric:"tabular-nums", fontSize:22, fontWeight:400, color:"#FFFFFF", lineHeight:1, textShadow:"0 1px 6px rgba(0,0,0,0.5)" }}>{todayMinutes}</span>
+            <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted }}>m</span>
+          </div>
+        </div>
+      </div>
+      <HorizonDivider />
+
+      {/* Week bars */}
+      <div style={{ padding:"9px 16px" }}>
+        <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:8 }}>本周</div>
+        <div style={{ display:"flex", gap:3, alignItems:"flex-end", height:44 }}>
+          {WEEK_DATA.map((d, i) => {
+            const isToday = i===(new Date().getDay()+6)%7;
+            const h = Math.max(3, Math.round((d.sessions/maxBar)*36));
+            return (
+              <div key={d.day} style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:2, flex:1 }}>
+                <div style={{
+                  width:"60%", height:h,
+                  background: isToday
+                    ? `linear-gradient(to top, rgba(226,239,239,0.85), rgba(255,255,255,0.95))`
+                    : "rgba(215,228,230,0.18)",
+                  borderRadius:2,
+                  boxShadow: isToday ? "0 0 8px rgba(255,255,255,0.3)" : "none",
+                }} />
+                <span style={{ fontFamily:"var(--font-sans)", fontSize:9, fontWeight: isToday ? 600 : 400, color: isToday ? "#FFFFFF" : C.textMuted }}>{d.day}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <HorizonDivider />
+
+      {/* Project bars */}
+      <div style={{ padding:"9px 16px" }}>
+        <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:8 }}>项目</div>
+        {[
+          { name:"后端", sessions:9, color:"rgba(226,239,239,0.85)" },
+          { name:"设计", sessions:4, color:"rgba(195,212,218,0.75)" },
+          { name:"运维", sessions:3, color:"rgba(185,160,170,0.75)" },
+          { name:"文档", sessions:2, color:"rgba(215,228,230,0.45)" },
+        ].map(p => (
+          <div key={p.name} style={{ display:"flex", alignItems:"center", gap:7, marginBottom:6 }}>
+            <span style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, width:24, flexShrink:0 }}>{p.name}</span>
+            <MiniBar value={p.sessions} max={9} color={p.color} />
+            <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted, width:10, textAlign:"right", flexShrink:0 }}>{p.sessions}</span>
+          </div>
+        ))}
+      </div>
+      <HorizonDivider />
+
+      {/* Session log — 航线 nautical route */}
+      <div style={{ padding:"9px 16px", flex:1 }}>
+        <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:10 }}>专注航线</div>
+        {logs.length === 0 ? (
+          <div style={{ fontSize:11, color:C.textMuted, fontStyle:"italic", fontFamily:"var(--font-sans)" }}>今日尚无记录</div>
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column" }}>
+            {logs.slice().reverse().map((log, idx, arr) => {
+              const isLast  = idx === arr.length-1;
+              const isFresh = idx === 0;
+              return (
+                <div key={log.id} style={{ display:"flex", gap:9, alignItems:"flex-start" }}>
+                  <div style={{ display:"flex", flexDirection:"column", alignItems:"center", flexShrink:0, width:11 }}>
+                    <div style={{ position:"relative", flexShrink:0, marginTop:2 }}>
+                      {isFresh && <div style={{ position:"absolute", inset:-3, borderRadius:"50%", border:"0.5px solid rgba(255,255,255,0.4)" }} />}
+                      <div style={{ width: isFresh ? 7 : 4, height: isFresh ? 7 : 4, borderRadius:"50%", background: isFresh ? "#FFFFFF" : "rgba(215,228,230,0.40)" }} />
+                    </div>
+                    {!isLast && (
+                      <div style={{
+                        width:1, flex:1, minHeight:14, margin:"3px 0",
+                        background:"linear-gradient(to bottom, rgba(215,228,230,0.30) 0%, rgba(215,228,230,0.08) 100%)",
+                        maskImage:"repeating-linear-gradient(to bottom, black 0px, black 3px, transparent 3px, transparent 6px)",
+                        WebkitMaskImage:"repeating-linear-gradient(to bottom, black 0px, black 3px, transparent 3px, transparent 6px)",
+                      }} />
+                    )}
+                  </div>
+                  <div style={{ paddingBottom: isLast ? 0 : 10, flex:1 }}>
+                    <div style={{ display:"flex", gap:4, alignItems:"center", marginBottom:2 }}>
+                      <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color: isFresh ? "rgba(240,246,248,0.90)" : "rgba(195,212,218,0.55)" }}>{log.time}</span>
+                      <span style={{
+                        fontFamily:"var(--font-mono)", fontSize:8, color:C.textMuted,
+                        background:"rgba(8,13,18,0.35)", borderRadius:3,
+                        padding:"1px 4px", border:`1px solid ${C.hairlineStr}`,
+                      }}>{log.duration}m</span>
+                    </div>
+                    <span style={{ fontSize:10, fontFamily:"var(--font-sans)", lineHeight:1.4, color: isFresh ? "#FFFFFF" : "rgba(220,232,236,0.65)" }}>{log.task}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+// ─── Week Line Chart ──────────────────────────────────────────────────────────
+function WeekLineChart({ todayIdx }: { todayIdx: number }) {
+  const svgW = 220, svgH = 60, padX = 8, padTop = 5, padBottom = 7;
+  const chartW = svgW - 2*padX;
+  const chartH = svgH - padTop - padBottom;
+  const maxV = Math.max(...WEEK_DATA.map(d => d.sessions));
+
+  const pts = WEEK_DATA.map((d, i) => ({
+    x: padX + (i/(WEEK_DATA.length-1))*chartW,
+    y: padTop + chartH - (d.sessions/maxV)*chartH,
+  }));
+
+  const line = catmullRomPath(pts);
+  const area = `${line} L ${pts[pts.length-1].x.toFixed(2)},${(svgH-padBottom).toFixed(2)} L ${pts[0].x.toFixed(2)},${(svgH-padBottom).toFixed(2)} Z`;
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${svgW} ${svgH}`} style={{ width:"100%", height:60, overflow:"visible" }}>
+        <defs>
+          <linearGradient id="wkAreaGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#9EADB2" stopOpacity="0.08" />
+            <stop offset="100%" stopColor="#9EADB2" stopOpacity="0.01" />
+          </linearGradient>
+        </defs>
+        <path d={area} fill="url(#wkAreaGrad)" />
+        <path d={line} fill="none" stroke="rgba(158,173,178,0.36)" strokeWidth="1"
+          strokeLinecap="round" strokeLinejoin="round" />
+        {pts.map((p, i) => (
+          <circle key={i} cx={p.x} cy={p.y}
+            r={i===todayIdx ? 2.5 : 1.3}
+            fill={i===todayIdx ? C.silver : "rgba(158,173,178,0.28)"}
+            stroke={i===todayIdx ? "rgba(158,173,178,0.18)" : "none"}
+            strokeWidth="1.5"
+          />
+        ))}
+        {todayIdx >= 0 && (
+          <text x={pts[todayIdx].x} y={pts[todayIdx].y-4} textAnchor="middle"
+            style={{ fontSize:6.5, fill:C.silver, fontFamily:"var(--font-mono)" }}>
+            {WEEK_DATA[todayIdx].sessions}
+          </text>
+        )}
+      </svg>
+      <div style={{ display:"flex", marginTop:3 }}>
+        {WEEK_DATA.map((d, i) => (
+          <div key={i} style={{ flex:1, textAlign:"center", fontFamily:"var(--font-sans)", fontSize:9, color: i===todayIdx ? C.silver : C.textMuted }}>{d.day}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Stats Full Page ──────────────────────────────────────────────────────────
+function StatsPage({ logs, sessionCount }:
+  { logs: SessionLog[]; sessionCount: number }) {
+
+  const todayIdx = (new Date().getDay()+6)%7;
+
+  return (
+    <div className="flex flex-col h-full" style={{ overflowY:"auto", position:"relative", zIndex:2 }}>
+      <div style={{ flexShrink:0 }}>
+        <div style={{ padding:"10px 22px" }}>
+          <span style={{ fontSize:13, fontWeight:500, color:C.textPrimary, fontFamily:"var(--font-sans)" }}>统计</span>
+        </div>
+        <HorizonDivider />
+      </div>
+
+      <div style={{ padding:"14px 22px 0", display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))", gap:9 }}>
+        {[
+          { label:"今日专注", value:sessionCount, unit:"次",  accent:true },
+          { label:"本周专注", value:41,           unit:"次",  accent:false },
+          { label:"连续天数", value:7,             unit:"天",  accent:false },
+          { label:"最佳单日", value:"周四",        unit:"",    accent:false },
+        ].map(stat => (
+          <div key={stat.label} style={{ padding:"12px 13px", ...CARD, background: stat.accent ? C.cardBright : C.card }}>
+            <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:7 }}>{stat.label}</div>
+            <div style={{ fontFamily:"var(--font-display)", fontVariantNumeric:"tabular-nums", fontSize:22, fontWeight:300, color: stat.accent ? C.moonlight : C.textPrimary, lineHeight:1 }}>{stat.value}</div>
+            {stat.unit && <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, marginTop:3 }}>{stat.unit}</div>}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ padding:"10px 22px" }}>
+        <div style={{ padding:"14px 16px", ...CARD }}>
+          <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:12 }}>
+            <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase" }}>本周每日专注</div>
+            <div style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted }}>均 {(WEEK_DATA.reduce((a,d)=>a+d.sessions,0)/7).toFixed(1)} 次/天</div>
+          </div>
+          <WeekLineChart todayIdx={todayIdx} />
+        </div>
+      </div>
+
+      <div style={{ padding:"0 22px 22px" }}>
+        <div style={{ padding:"14px 16px", ...CARD }}>
+          <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:11 }}>专注记录</div>
+          {logs.length === 0 ? (
+            <div style={{ fontSize:11, color:C.textMuted, fontStyle:"italic", fontFamily:"var(--font-sans)", padding:"4px 0" }}>完成一次专注后将显示在此</div>
+          ) : (
+            <table style={{ width:"100%", borderCollapse:"collapse" }}>
+              <thead>
+                <tr>
+                  {["时间","任务","时长"].map(h => (
+                    <th key={h} style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", textAlign:"left", padding:"0 0 7px", fontWeight:400, borderBottom:`0.5px solid ${C.hairline}` }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {logs.map(log => (
+                  <tr key={log.id}>
+                    <td style={{ padding:"7px 0", fontFamily:"var(--font-mono)", fontSize:10, color:"rgba(158,173,178,0.62)", borderBottom:`0.5px solid ${C.hairline}` }}>{log.time}</td>
+                    <td style={{ padding:"7px 0", fontSize:11, color:C.textSec, fontFamily:"var(--font-sans)", borderBottom:`0.5px solid ${C.hairline}` }}>{log.task}</td>
+                    <td style={{ padding:"7px 0", fontFamily:"var(--font-mono)", fontSize:10, color:C.textMuted, borderBottom:`0.5px solid ${C.hairline}` }}>{log.duration}m</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── App Root ─────────────────────────────────────────────────────────────────
+export default function App() {
+  const [nav, setNav]                   = useState<NavSection>("timer");
+  const [tasks, setTasks]               = useState<Task[]>(SAMPLE_TASKS);
+  const [logs, setLogs]                 = useState<SessionLog[]>(SAMPLE_LOGS);
+  const [sessionCount, setSessionCount] = useState(SAMPLE_LOGS.length);
+
+  const handleLogSession = useCallback((task: string, duration: number) => {
+    const now = new Date();
+    const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    setLogs(p => [...p, { id:uid(), time, duration, task }]);
+    setSessionCount(n => n+1);
+  }, []);
+
+  const centerContent = (() => {
+    switch (nav) {
+      case "timer":    return <TimerPanel tasks={tasks} onLogSession={handleLogSession} />;
+      case "tasks":    return <TasksPanel tasks={tasks} setTasks={setTasks} />;
+      case "stats":    return <StatsPage  logs={logs} sessionCount={sessionCount} />;
+      case "settings": return <SettingsPanel />;
+    }
+  })();
+
+  const showRight = nav === "timer" || nav === "tasks";
+
+  return (
+    <div style={{
+      width: "100%", height: "100%", position: "relative",
+      background: "#050709", overflow: "hidden",
+      display: "flex",
+    }}>
+      <OceanVideo />
+
+      <Sidebar active={nav} onNav={setNav} />
+
+      {/* Content: main (1fr) + right sidebar (clamp width) on same ocean canvas */}
+      <div
+        className={`content-area${showRight ? " with-right" : ""}`}
+        style={{
+          gridTemplateColumns: showRight
+            ? "1fr clamp(240px, 18vw, 320px)"
+            : "1fr",
+        }}
+      >
+        <main style={{ overflow: "hidden", display: "flex", minWidth: 0 }}>
+          <div key={nav} className="panel-enter" style={{ flex: 1, display: "flex", overflow: "hidden", minWidth: 0 }}>
+            {centerContent}
+          </div>
+        </main>
+
+        {showRight && <StatsPanel logs={logs} sessionCount={sessionCount} />}
+      </div>
+    </div>
+  );
+}
