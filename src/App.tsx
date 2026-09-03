@@ -119,7 +119,7 @@ function OceanVideo() {
       <video
         ref={videoRef}
         autoPlay muted loop playsInline
-        poster="https://images.pexels.com/videos/4938208/apartment-apartment-building-at-sea-beach-4938208.jpeg?auto=compress&cs=tinysrgb&w=1920&h=1080&dpr=1"
+        poster="/media/ocean-poster.jpg"
         style={{
           position: "fixed", inset: 0,
           width: "100vw", height: "100vh",
@@ -130,9 +130,7 @@ function OceanVideo() {
           filter: "brightness(0.52) saturate(0.44) contrast(0.94)",
         }}
       >
-        <source src="https://videos.pexels.com/video-files/4938208/4938208-hd_1920_1080_25fps.mp4" type="video/mp4" />
-        <source src="https://videos.pexels.com/video-files/4938208/4938208-uhd_2560_1440_25fps.mp4" type="video/mp4" />
-        <source src="https://videos.pexels.com/video-files/33191633/14145109_2560_1440_30fps.mp4" type="video/mp4" />
+        <source src="/media/ocean-loop.mp4" type="video/mp4" />
       </video>
 
       {/* Single continuous vignette — no section-specific bands */}
