@@ -10,6 +10,7 @@
     "format": "oxfmt",
     "test": "vitest",
     "test:run": "vitest run",
+    "verify": "tsc --noEmit -p tsconfig.json && vitest run && vite build",
     "tauri": "tauri"
   },
   "dependencies": {
