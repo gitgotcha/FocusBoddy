@@ -542,7 +542,7 @@ function TimerPanel({ tasks, onLogSession }:
 
         {/* Controls */}
         <div className="su-2 surface-up" style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <button onClick={handleReset} title="重置" className="btn-ctrl" style={ctrlBtn}>
+          <button onClick={handleReset} title="重置" aria-label="重置计时" className="btn-ctrl" style={ctrlBtn}>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M2 7a5 5 0 1 0 1-3H1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
               <path d="M1 4V7H4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
@@ -550,7 +550,7 @@ function TimerPanel({ tasks, onLogSession }:
           </button>
 
           {state === "running" ? (
-            <button onClick={handlePause} className="btn-main"
+            <button onClick={handlePause} aria-label="暂停计时" className="btn-main"
               style={{
                 width: 68, height: 68, borderRadius: "50%",
                 background: C.glassTint,
@@ -566,7 +566,7 @@ function TimerPanel({ tasks, onLogSession }:
               </svg>
             </button>
           ) : (
-            <button onClick={handleStart} className="btn-main"
+            <button onClick={handleStart} aria-label={state === "done" ? "重新开始专注" : "开始专注"} className="btn-main"
               style={{
                 width: 68, height: 68, borderRadius: "50%",
                 background: state === "done" ? "rgba(27,37,44,0.38)" : "rgba(158,173,178,0.06)",
