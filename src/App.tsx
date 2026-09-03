@@ -1,15 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import type { Task, TaskPriority, TimerMode, TimerSession, TimerState } from "./domain/models";
+import { DEFAULT_SETTINGS, durationSecondsForMode } from "./domain/defaults";
+import { useAppGateway } from "./services/gatewayContext";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type NavSection   = "timer" | "tasks" | "stats" | "settings";
-type TimerMode    = "focus" | "short" | "long";
-type TimerState   = "idle" | "running" | "paused" | "done";
-type TaskPriority = "high" | "med" | "low";
+type NavSection = "timer" | "tasks" | "stats" | "settings";
 
-interface Task {
-  id: string; title: string; done: boolean;
-  pomodoros: number; priority: TaskPriority; project: string;
-}
+/** A completed session rendered in the activity list. */
 interface SessionLog {
   id: string; time: string; duration: number; task: string;
 }
@@ -53,25 +50,14 @@ const SIDEBAR_GLASS: React.CSSProperties = {
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const DURATIONS: Record<TimerMode, number> = { focus: 25*60, short: 5*60, long: 15*60 };
+// Derived from the shared defaults so the literals only live in domain/defaults.
+// T7 swaps this for the persisted settings once save_settings lands.
+const DURATIONS: Record<TimerMode, number> = {
+  focus: durationSecondsForMode("focus", DEFAULT_SETTINGS),
+  short: durationSecondsForMode("short", DEFAULT_SETTINGS),
+  long:  durationSecondsForMode("long",  DEFAULT_SETTINGS),
+};
 const MODE_LABELS: Record<TimerMode, string> = { focus: "专注", short: "短休", long: "长休" };
-
-const SAMPLE_TASKS: Task[] = [
-  { id:"t1", title:"重构身份验证流程",       done:false, pomodoros:3, priority:"high", project:"后端" },
-  { id:"t2", title:"为 API 编写单元测试",     done:false, pomodoros:2, priority:"med",  project:"后端" },
-  { id:"t3", title:"更新设计系统令牌",        done:true,  pomodoros:1, priority:"low",  project:"设计" },
-  { id:"t4", title:"审查 Pull Request #247", done:false, pomodoros:1, priority:"high", project:"运维" },
-  { id:"t5", title:"优化数据库查询",          done:false, pomodoros:4, priority:"med",  project:"后端" },
-  { id:"t6", title:"编写 REST 接口文档",      done:true,  pomodoros:2, priority:"low",  project:"文档" },
-];
-
-const SAMPLE_LOGS: SessionLog[] = [
-  { id:"s1", time:"09:05", duration:25, task:"重构身份验证流程" },
-  { id:"s2", time:"09:35", duration:25, task:"为 API 编写单元测试" },
-  { id:"s3", time:"10:05", duration:25, task:"审查 Pull Request #247" },
-  { id:"s4", time:"10:45", duration:25, task:"重构身份验证流程" },
-  { id:"s5", time:"11:15", duration:25, task:"优化数据库查询" },
-];
 
 const WEEK_DATA = [
   { day:"一", sessions:6 }, { day:"二", sessions:8 },
@@ -160,6 +146,18 @@ function OceanVideo() {
 function pad(n: number) { return String(n).padStart(2, "0"); }
 function formatSeconds(s: number) { return { m: pad(Math.floor(s/60)), s: pad(s%60) }; }
 function uid() { return Math.random().toString(36).slice(2,9); }
+
+/** Projects a persisted session onto the activity-list row shape. */
+function sessionToLog(session: TimerSession): SessionLog {
+  const at = new Date(session.startedAt);
+  return {
+    id: session.id,
+    time: `${pad(at.getHours())}:${pad(at.getMinutes())}`,
+    duration: Math.round(session.focusedSeconds / 60),
+    task: session.taskTitleSnapshot,
+  };
+}
+
 function chineseDate() {
   const d = new Date();
   const wd = ["周日","周一","周二","周三","周四","周五","周六"];
@@ -286,6 +284,7 @@ function Sidebar({ active, onNav }: { active: NavSection; onNav: (s: NavSection)
           const isActive = active === item.id;
           return (
             <button key={item.id} onClick={() => onNav(item.id)} title={item.label}
+              aria-label={item.label}
               className="nav-btn"
               style={{
                 width: 36, height: 36, borderRadius: 10,
@@ -639,7 +638,7 @@ function TimerPanel({ tasks, onLogSession }:
                         </svg>
                       )}
                       <span style={{ flex: 1, lineHeight: 1.4 }}>{task.title}</span>
-                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: C.textMuted, flexShrink: 0 }}>×{task.pomodoros}</span>
+                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: C.textMuted, flexShrink: 0 }}>×{task.pomodoroTarget}</span>
                     </button>
                   );
                 })}
@@ -660,23 +659,25 @@ function PriorityPip({ p }: { p: TaskPriority }) {
   return <span style={{ width: 5, height: 5, borderRadius: "50%", background: colors[p], display: "inline-block", flexShrink: 0 }} />;
 }
 
-function TasksPanel({ tasks, setTasks }:
-  { tasks: Task[]; setTasks: React.Dispatch<React.SetStateAction<Task[]>> }) {
+function TasksPanel({ tasks, onCreateTask, onToggleTask, onDeleteTask, onCyclePriority }: {
+  tasks: Task[];
+  onCreateTask: (title: string) => Promise<unknown>;
+  onToggleTask: (id: string) => Promise<unknown>;
+  onDeleteTask: (id: string) => Promise<unknown>;
+  onCyclePriority: (id: string) => Promise<unknown>;
+}) {
 
   const [newTitle, setNewTitle] = useState("");
   const [filter, setFilter]    = useState<"all"|"active"|"done">("all");
 
   const addTask = () => {
     const title = newTitle.trim(); if (!title) return;
-    setTasks(p => [{ id:uid(), title, done:false, pomodoros:1, priority:"med", project:"通用" }, ...p]);
     setNewTitle("");
+    void onCreateTask(title);
   };
-  const toggleTask    = (id: string) => setTasks(p => p.map(t => t.id===id ? {...t,done:!t.done} : t));
-  const deleteTask    = (id: string) => setTasks(p => p.filter(t => t.id!==id));
-  const cyclePriority = (id: string) => {
-    const cycle: TaskPriority[] = ["low","med","high"];
-    setTasks(p => p.map(t => t.id===id ? {...t, priority:cycle[(cycle.indexOf(t.priority)+1)%3]} : t));
-  };
+  const toggleTask    = (id: string) => { void onToggleTask(id); };
+  const deleteTask    = (id: string) => { void onDeleteTask(id); };
+  const cyclePriority = (id: string) => { void onCyclePriority(id); };
 
   const filtered = tasks.filter(t => filter==="all" ? true : filter==="active" ? !t.done : t.done);
   const fLabels = { all:"全部", active:"进行中", done:"已完成" } as const;
@@ -751,6 +752,7 @@ function TasksPanel({ tasks, setTasks }:
               <div key={task.id} className="slide-in task-item"
                 style={{ display:"flex", alignItems:"center", gap:9, padding:"9px 12px", ...CARD }}>
                 <button onClick={() => toggleTask(task.id)} className="btn-check"
+                  aria-label={task.done ? "取消完成" : "标记完成"}
                   style={{
                     width:15, height:15, borderRadius:5, flexShrink:0,
                     border:`1.5px solid ${task.done ? C.silver : "rgba(215,228,230,0.14)"}`,
@@ -764,6 +766,7 @@ function TasksPanel({ tasks, setTasks }:
                   )}
                 </button>
                 <button onClick={() => cyclePriority(task.id)}
+                  aria-label="切换优先级"
                   style={{ background:"none", border:"none", cursor:"pointer", padding:0, display:"flex" }}>
                   <PriorityPip p={task.priority} />
                 </button>
@@ -779,8 +782,9 @@ function TasksPanel({ tasks, setTasks }:
                   background:"rgba(27,37,44,0.26)", border:`1px solid ${C.hairline}`,
                   padding:"1px 5px", borderRadius:4, flexShrink:0,
                 }}>{task.project}</span>
-                <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted }}>×{task.pomodoros}</span>
+                <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted }}>×{task.pomodoroTarget}</span>
                 <button onClick={() => deleteTask(task.id)} className="btn-delete"
+                  aria-label="删除任务"
                   style={{
                     width:20, height:20, borderRadius:4, flexShrink:0,
                     background:"none", border:"1px solid transparent",
@@ -1171,23 +1175,72 @@ function StatsPage({ logs, sessionCount }:
 
 // ─── App Root ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [nav, setNav]                   = useState<NavSection>("timer");
-  const [tasks, setTasks]               = useState<Task[]>(SAMPLE_TASKS);
-  const [logs, setLogs]                 = useState<SessionLog[]>(SAMPLE_LOGS);
-  const [sessionCount, setSessionCount] = useState(SAMPLE_LOGS.length);
+  const gateway = useAppGateway();
+  const [nav, setNav]     = useState<NavSection>("timer");
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [logs, setLogs]   = useState<SessionLog[]>([]);
+
+  // Load persisted state once. A failure (e.g. running outside Tauri) simply
+  // leaves the empty state in place rather than showing fabricated data.
+  useEffect(() => {
+    let cancelled = false;
+    gateway.bootstrap()
+      .then(payload => {
+        if (cancelled) return;
+        setTasks(payload.tasks);
+        setLogs(payload.sessions.map(sessionToLog));
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [gateway]);
+
+  const createTask = useCallback(async (title: string) => {
+    const task = await gateway.createTask({
+      title, pomodoroTarget: 1, priority: "med", project: "通用",
+    });
+    setTasks(p => [...p, task]);
+  }, [gateway]);
+
+  const toggleTask = useCallback(async (id: string) => {
+    const current = tasks.find(t => t.id === id);
+    if (!current) return;
+    const updated = await gateway.updateTask({ id, done: !current.done });
+    setTasks(p => p.map(t => (t.id === id ? updated : t)));
+  }, [gateway, tasks]);
+
+  const deleteTask = useCallback(async (id: string) => {
+    await gateway.deleteTask(id);
+    setTasks(p => p.filter(t => t.id !== id));
+  }, [gateway]);
+
+  const cyclePriority = useCallback(async (id: string) => {
+    const cycle: TaskPriority[] = ["low", "med", "high"];
+    const current = tasks.find(t => t.id === id);
+    if (!current) return;
+    const next = cycle[(cycle.indexOf(current.priority) + 1) % cycle.length];
+    const updated = await gateway.updateTask({ id, priority: next });
+    setTasks(p => p.map(t => (t.id === id ? updated : t)));
+  }, [gateway, tasks]);
 
   const handleLogSession = useCallback((task: string, duration: number) => {
     const now = new Date();
     const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    setLogs(p => [...p, { id:uid(), time, duration, task }]);
-    setSessionCount(n => n+1);
+    setLogs(p => [...p, { id: uid(), time, duration, task }]);
   }, []);
 
   const centerContent = (() => {
     switch (nav) {
       case "timer":    return <TimerPanel tasks={tasks} onLogSession={handleLogSession} />;
-      case "tasks":    return <TasksPanel tasks={tasks} setTasks={setTasks} />;
-      case "stats":    return <StatsPage  logs={logs} sessionCount={sessionCount} />;
+      case "tasks":    return (
+        <TasksPanel
+          tasks={tasks}
+          onCreateTask={createTask}
+          onToggleTask={toggleTask}
+          onDeleteTask={deleteTask}
+          onCyclePriority={cyclePriority}
+        />
+      );
+      case "stats":    return <StatsPage  logs={logs} sessionCount={logs.length} />;
       case "settings": return <SettingsPanel />;
     }
   })();
@@ -1219,7 +1272,7 @@ export default function App() {
           </div>
         </main>
 
-        {showRight && <StatsPanel logs={logs} sessionCount={sessionCount} />}
+        {showRight && <StatsPanel logs={logs} sessionCount={logs.length} />}
       </div>
     </div>
   );
