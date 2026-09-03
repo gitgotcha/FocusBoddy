@@ -3,14 +3,19 @@ use uuid::Uuid;
 
 use crate::error::CommandError;
 use crate::models::{
-    AppSettings, CreateTaskInput, ProjectStat, SessionStatus, Statistics, Task, TaskPriority,
-    TimerMode, TimerSession, TimerSnapshot, TimerState, UpdateTaskInput,
+    AppSettings, CreateTaskInput, ProjectStat, SaveSettingsResult, SessionStatus, Statistics, Task,
+    TaskPriority, TimerMode, TimerSession, TimerSnapshot, TimerState, UpdateTaskInput,
 };
 
 pub const MIN_POMODORO_TARGET: i64 = 1;
 pub const MAX_POMODORO_TARGET: i64 = 99;
 pub const MAX_TITLE_CHARS: usize = 200;
 pub const DEFAULT_PROJECT: &str = "通用";
+
+pub const MIN_DURATION_MINUTES: i64 = 1;
+pub const MAX_DURATION_MINUTES: i64 = 180;
+pub const MIN_DAILY_GOAL: i64 = 1;
+pub const MAX_DAILY_GOAL: i64 = 50;
 
 const TASK_COLUMNS: &str = "id, title, done, pomodoro_target, priority, project, sort_order, \
                             created_at, updated_at, completed_at";
@@ -232,6 +237,118 @@ pub fn get_settings(conn: &Connection) -> Result<AppSettings, CommandError> {
         },
     )
     .map_err(Into::into)
+}
+
+pub fn validate_settings(settings: &AppSettings) -> Result<(), CommandError> {
+    let check_range = |value: i64, min: i64, max: i64, name: &str| {
+        if (min..=max).contains(&value) {
+            Ok(())
+        } else {
+            Err(CommandError::validation(format!(
+                "{name} must be between {min} and {max}"
+            )))
+        }
+    };
+
+    check_range(
+        settings.focus_duration_minutes,
+        MIN_DURATION_MINUTES,
+        MAX_DURATION_MINUTES,
+        "focusDurationMinutes",
+    )?;
+    check_range(
+        settings.short_break_minutes,
+        MIN_DURATION_MINUTES,
+        MAX_DURATION_MINUTES,
+        "shortBreakMinutes",
+    )?;
+    check_range(
+        settings.long_break_minutes,
+        MIN_DURATION_MINUTES,
+        MAX_DURATION_MINUTES,
+        "longBreakMinutes",
+    )?;
+    check_range(
+        settings.daily_goal,
+        MIN_DAILY_GOAL,
+        MAX_DAILY_GOAL,
+        "dailyGoal",
+    )?;
+    Ok(())
+}
+
+/// Persists settings and returns the updated settings plus a refreshed timer.
+///
+/// If the timer is idle, its `durationSeconds` / `remainingSeconds` are
+/// recalculated from the new durations so the UI immediately reflects the
+/// change. A running or paused timer is left untouched — the new durations
+/// take effect on the next session.
+pub fn save_settings(
+    conn: &Connection,
+    settings: &AppSettings,
+) -> Result<SaveSettingsResult, CommandError> {
+    validate_settings(settings)?;
+
+    let now = now_millis();
+    conn.execute(
+        "UPDATE settings SET focus_duration_minutes = ?1, short_break_minutes = ?2,
+                              long_break_minutes = ?3, auto_start_break = ?4,
+                              sound_enabled = ?5, notification_enabled = ?6,
+                              daily_goal = ?7, updated_at = ?8
+         WHERE id = 1",
+        params![
+            settings.focus_duration_minutes,
+            settings.short_break_minutes,
+            settings.long_break_minutes,
+            settings.auto_start_break as i64,
+            settings.sound_enabled as i64,
+            settings.notification_enabled as i64,
+            settings.daily_goal,
+            now,
+        ],
+    )?;
+
+    let mut timer = get_timer(conn)?;
+    if timer.state == TimerState::Idle {
+        let new_duration = settings.duration_seconds_for_mode(timer.mode);
+        timer.duration_seconds = new_duration;
+        timer.remaining_seconds = new_duration;
+        timer.updated_at = now;
+        write_timer(conn, &timer)?;
+    }
+
+    let persisted = get_settings(conn)?;
+    Ok(SaveSettingsResult {
+        settings: persisted,
+        timer,
+    })
+}
+
+fn write_timer(conn: &Connection, timer: &TimerSnapshot) -> Result<(), CommandError> {
+    conn.execute(
+        "UPDATE timer_state SET mode = ?1, state = ?2, active_session_id = ?3,
+                                selected_task_id = ?4, task_title_snapshot = ?5,
+                                project_snapshot = ?6, duration_seconds = ?7,
+                                remaining_seconds = ?8, started_at = ?9, target_end_at = ?10,
+                                paused_at = ?11, revision = ?12, updated_at = ?13
+         WHERE id = 1",
+        params![
+            timer.mode.as_str(),
+            timer.state.as_str(),
+            timer.active_session_id,
+            timer.selected_task_id,
+            timer.task_title_snapshot,
+            timer.project_snapshot,
+            timer.duration_seconds,
+            timer.remaining_seconds,
+            timer.started_at,
+            timer.target_end_at,
+            timer.paused_at,
+            timer.revision,
+            timer.updated_at,
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn get_timer(conn: &Connection) -> Result<TimerSnapshot, CommandError> {
@@ -522,5 +639,67 @@ mod tests {
         assert_eq!(stats.by_project[0].project, "Abyssal");
         assert_eq!(stats.by_project[0].sessions, 2);
         assert_eq!(stats.by_project[0].focus_seconds, 2700);
+    }
+
+    #[test]
+    fn save_settings_persists_and_returns_the_updated_row() {
+        let conn = db::open_in_memory().expect("database should open");
+
+        let mut settings = get_settings(&conn).expect("default settings");
+        settings.focus_duration_minutes = 30;
+        settings.short_break_minutes = 10;
+        settings.long_break_minutes = 20;
+        settings.daily_goal = 6;
+        settings.auto_start_break = true;
+
+        let result = save_settings(&conn, &settings).expect("save");
+        assert_eq!(result.settings.focus_duration_minutes, 30);
+        assert_eq!(result.settings.short_break_minutes, 10);
+        assert_eq!(result.settings.long_break_minutes, 20);
+        assert_eq!(result.settings.daily_goal, 6);
+        assert!(result.settings.auto_start_break);
+        assert!(result.settings.updated_at > 0);
+
+        // Re-read to confirm persistence.
+        let reread = get_settings(&conn).expect("re-read");
+        assert_eq!(reread.focus_duration_minutes, 30);
+        assert_eq!(reread.daily_goal, 6);
+    }
+
+    #[test]
+    fn save_settings_refreshes_idle_timer_durations() {
+        let conn = db::open_in_memory().expect("database should open");
+
+        let mut settings = get_settings(&conn).expect("default settings");
+        settings.focus_duration_minutes = 45;
+
+        let result = save_settings(&conn, &settings).expect("save");
+
+        // Idle timer should reflect the new 45-minute focus duration.
+        assert_eq!(result.timer.state, TimerState::Idle);
+        assert_eq!(result.timer.mode, TimerMode::Focus);
+        assert_eq!(result.timer.duration_seconds, 45 * 60);
+        assert_eq!(result.timer.remaining_seconds, 45 * 60);
+    }
+
+    #[test]
+    fn save_settings_rejects_out_of_range_durations_and_goals() {
+        let conn = db::open_in_memory().expect("database should open");
+
+        let mut settings = get_settings(&conn).expect("default settings");
+
+        settings.focus_duration_minutes = 0;
+        assert!(save_settings(&conn, &settings).is_err());
+
+        settings.focus_duration_minutes = 25;
+        settings.short_break_minutes = 200;
+        assert!(save_settings(&conn, &settings).is_err());
+
+        settings.short_break_minutes = 5;
+        settings.daily_goal = 0;
+        assert!(save_settings(&conn, &settings).is_err());
+
+        settings.daily_goal = 100;
+        assert!(save_settings(&conn, &settings).is_err());
     }
 }

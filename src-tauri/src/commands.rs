@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use tauri::State;
 
 use crate::error::CommandError;
-use crate::models::{BootstrapPayload, CreateTaskInput, Task, UpdateTaskInput};
+use crate::models::{AppSettings, BootstrapPayload, CreateTaskInput, SaveSettingsResult, Task, UpdateTaskInput};
 use crate::repository;
 use crate::AppState;
 
@@ -47,4 +47,10 @@ pub fn update_task(state: State<'_, AppState>, input: UpdateTaskInput) -> Result
 pub fn delete_task(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
     let conn = lock_db(&state)?;
     repository::delete_task(&conn, &id)
+}
+
+#[tauri::command]
+pub fn save_settings(state: State<'_, AppState>, input: AppSettings) -> Result<SaveSettingsResult, CommandError> {
+    let conn = lock_db(&state)?;
+    repository::save_settings(&conn, &input)
 }

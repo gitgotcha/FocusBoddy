@@ -294,6 +294,13 @@ pub struct BootstrapPayload {
     pub statistics: Statistics,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSettingsResult {
+    pub settings: AppSettings,
+    pub timer: TimerSnapshot,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

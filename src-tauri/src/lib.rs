@@ -35,6 +35,7 @@ pub fn run() {
             commands::create_task,
             commands::update_task,
             commands::delete_task,
+            commands::save_settings,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Abyssal Reverie");

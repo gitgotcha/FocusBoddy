@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { Task, TaskPriority, TimerMode, TimerSession, TimerState } from "./domain/models";
+import type { AppSettings, Task, TaskPriority, TimerMode, TimerSession, TimerState } from "./domain/models";
 import { DEFAULT_SETTINGS, durationSecondsForMode } from "./domain/defaults";
 import { useAppGateway } from "./services/gatewayContext";
 
@@ -50,13 +50,8 @@ const SIDEBAR_GLASS: React.CSSProperties = {
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-// Derived from the shared defaults so the literals only live in domain/defaults.
-// T7 swaps this for the persisted settings once save_settings lands.
-const DURATIONS: Record<TimerMode, number> = {
-  focus: durationSecondsForMode("focus", DEFAULT_SETTINGS),
-  short: durationSecondsForMode("short", DEFAULT_SETTINGS),
-  long:  durationSecondsForMode("long",  DEFAULT_SETTINGS),
-};
+// Derived from the shared settings; updated when settings are persisted.
+// Until bootstrap loads persisted settings, the defaults are used.
 const MODE_LABELS: Record<TimerMode, string> = { focus: "专注", short: "短休", long: "长休" };
 
 const WEEK_DATA = [
@@ -400,27 +395,30 @@ function TimerArc({ progress, mode, isRunning, isDone }:
 }
 
 // ─── Timer Panel ──────────────────────────────────────────────────────────────
-function TimerPanel({ tasks, onLogSession }:
-  { tasks: Task[]; onLogSession: (task: string, duration: number) => void }) {
+function TimerPanel({ tasks, onLogSession, durations }: {
+  tasks: Task[];
+  onLogSession: (task: string, duration: number) => void;
+  durations: (mode: TimerMode) => number;
+}) {
 
   const [mode, setMode]             = useState<TimerMode>("focus");
   const [state, setState]           = useState<TimerState>("idle");
-  const [remaining, setRemaining]   = useState(DURATIONS.focus);
+  const [remaining, setRemaining]   = useState(durations("focus"));
   const [selectedTask, setSelected] = useState(tasks[0]?.id ?? "");
   const [sessions, setSessions]     = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const total    = DURATIONS[mode];
+  const total    = durations(mode);
   const progress = remaining / total;
 
   const clearTimer = useCallback(() => {
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
   }, []);
 
-  const handleStart = () => { if (state === "done") setRemaining(DURATIONS[mode]); setState("running"); };
+  const handleStart = () => { if (state === "done") setRemaining(durations(mode)); setState("running"); };
   const handlePause = () => setState("paused");
-  const handleReset = () => { clearTimer(); setState("idle"); setRemaining(DURATIONS[mode]); };
-  const switchMode  = (m: TimerMode) => { clearTimer(); setState("idle"); setMode(m); setRemaining(DURATIONS[m]); };
+  const handleReset = () => { clearTimer(); setState("idle"); setRemaining(durations(mode)); };
+  const switchMode  = (m: TimerMode) => { clearTimer(); setState("idle"); setMode(m); setRemaining(durations(m)); };
 
   useEffect(() => {
     if (state === "running") {
@@ -429,7 +427,7 @@ function TimerPanel({ tasks, onLogSession }:
           if (r <= 1) {
             clearTimer(); setState("done"); setSessions(s => s+1);
             const task = tasks.find(t => t.id === selectedTask);
-            onLogSession(task?.title ?? "未命名任务", DURATIONS[mode]/60);
+            onLogSession(task?.title ?? "未命名任务", durations(mode)/60);
             return 0;
           }
           return r - 1;
@@ -805,14 +803,35 @@ function TasksPanel({ tasks, onCreateTask, onToggleTask, onDeleteTask, onCyclePr
 }
 
 // ─── Settings Panel ───────────────────────────────────────────────────────────
-function SettingsPanel() {
-  const [focusDur, setFocusDur]   = useState(25);
-  const [shortDur, setShortDur]   = useState(5);
-  const [longDur, setLongDur]     = useState(15);
-  const [autoStart, setAutoStart] = useState(false);
-  const [sound, setSound]         = useState(true);
-  const [notif, setNotif]         = useState(true);
-  const [dailyGoal, setDailyGoal] = useState(8);
+function SettingsPanel({ settings, onSaveSettings }: {
+  settings: AppSettings | null;
+  onSaveSettings: (settings: AppSettings) => Promise<unknown>;
+}) {
+  const gateway = useAppGateway();
+  const [draft, setDraft] = useState<AppSettings | null>(settings);
+  const [saving, setSaving] = useState(false);
+
+  // Sync from the latest persisted settings when they change externally.
+  useEffect(() => { setDraft(settings); }, [settings]);
+
+  // Persist whenever the draft diverges from the persisted copy.
+  const persist = useCallback(async (next: AppSettings) => {
+    setSaving(true);
+    try {
+      await onSaveSettings(next);
+    } finally {
+      setSaving(false);
+    }
+  }, [onSaveSettings]);
+
+  const update = useCallback((patch: Partial<AppSettings>) => {
+    setDraft(prev => {
+      if (!prev) return prev;
+      const next = { ...prev, ...patch };
+      void persist(next);
+      return next;
+    });
+  }, [persist]);
 
   const Toggle = ({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) => (
     <button onClick={() => onChange(!value)} className="btn-toggle"
@@ -873,32 +892,49 @@ function SettingsPanel() {
     </div>
   );
 
+  if (!draft) {
+    return (
+      <div className="flex flex-col h-full" style={{ position:"relative", zIndex:2 }}>
+        <div style={{ flexShrink:0 }}>
+          <div style={{ padding:"10px 22px" }}>
+            <span style={{ fontSize:13, fontWeight:500, color:C.textPrimary, fontFamily:"var(--font-sans)" }}>设置</span>
+          </div>
+          <HorizonDivider />
+        </div>
+        <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center" }}>
+          <span style={{ fontSize:11, color:C.textMuted }}>加载中…</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full" style={{ position:"relative", zIndex:2 }}>
       <div style={{ flexShrink:0 }}>
-        <div style={{ padding:"10px 22px" }}>
+        <div style={{ display:"flex", alignItems:"center", padding:"10px 22px" }}>
           <span style={{ fontSize:13, fontWeight:500, color:C.textPrimary, fontFamily:"var(--font-sans)" }}>设置</span>
+          {saving && <span style={{ marginLeft:"auto", fontSize:10, color:C.textMuted, fontFamily:"var(--font-sans)" }}>保存中…</span>}
         </div>
         <HorizonDivider />
       </div>
       <div className="flex-1 overflow-y-auto" style={{ padding:"4px 22px" }}>
         <Section label="时长（分钟）">
-          <Row label="专注"><Stepper value={focusDur} onChange={setFocusDur} min={5} max={90} /></Row>
-          <Row label="短休"><Stepper value={shortDur} onChange={setShortDur} min={1} max={30} /></Row>
-          <Row label="长休" last><Stepper value={longDur} onChange={setLongDur} min={5} max={60} /></Row>
+          <Row label="专注"><Stepper value={draft.focusDurationMinutes} onChange={v => update({ focusDurationMinutes: v })} min={1} max={180} /></Row>
+          <Row label="短休"><Stepper value={draft.shortBreakMinutes} onChange={v => update({ shortBreakMinutes: v })} min={1} max={180} /></Row>
+          <Row label="长休" last><Stepper value={draft.longBreakMinutes} onChange={v => update({ longBreakMinutes: v })} min={1} max={180} /></Row>
         </Section>
         <Section label="行为">
-          <Row label="自动开始休息" hint="专注结束后自动继续"><Toggle value={autoStart} onChange={setAutoStart} /></Row>
-          <Row label="声音提示"><Toggle value={sound} onChange={setSound} /></Row>
-          <Row label="桌面通知" last><Toggle value={notif} onChange={setNotif} /></Row>
+          <Row label="自动开始休息" hint="专注结束后自动继续"><Toggle value={draft.autoStartBreak} onChange={v => update({ autoStartBreak: v })} /></Row>
+          <Row label="声音提示"><Toggle value={draft.soundEnabled} onChange={v => update({ soundEnabled: v })} /></Row>
+          <Row label="桌面通知" last><Toggle value={draft.notificationEnabled} onChange={v => update({ notificationEnabled: v })} /></Row>
         </Section>
         <Section label="目标">
-          <Row label="每日专注次数" last><Stepper value={dailyGoal} onChange={setDailyGoal} min={1} max={20} /></Row>
+          <Row label="每日专注次数" last><Stepper value={draft.dailyGoal} onChange={v => update({ dailyGoal: v })} min={1} max={50} /></Row>
         </Section>
         <div style={{ ...CARD, borderRadius:12, padding:"11px 13px", marginBottom:20 }}>
           <div style={{ fontSize:9, color:"rgba(165,182,188,0.34)", marginBottom:4, fontFamily:"var(--font-sans)", letterSpacing:"0.10em", textTransform:"uppercase" }}>关于</div>
           <div style={{ fontSize:12, color:C.textSec, fontFamily:"var(--font-sans)" }}>深海专注 · 桌面计时器</div>
-          <div style={{ fontSize:10, color:C.textMuted, marginTop:2, fontFamily:"var(--font-mono)", letterSpacing:"0.04em" }}>v0.9.2 · 2026</div>
+          <div style={{ fontSize:10, color:C.textMuted, marginTop:2, fontFamily:"var(--font-mono)", letterSpacing:"0.04em" }}>v1.0.0 · 2026</div>
         </div>
       </div>
     </div>
@@ -1179,6 +1215,10 @@ export default function App() {
   const [nav, setNav]     = useState<NavSection>("timer");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [logs, setLogs]   = useState<SessionLog[]>([]);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+
+  const activeSettings = settings ?? DEFAULT_SETTINGS;
+  const durations = useCallback((mode: TimerMode) => durationSecondsForMode(mode, activeSettings), [activeSettings]);
 
   // Load persisted state once. A failure (e.g. running outside Tauri) simply
   // leaves the empty state in place rather than showing fabricated data.
@@ -1189,9 +1229,15 @@ export default function App() {
         if (cancelled) return;
         setTasks(payload.tasks);
         setLogs(payload.sessions.map(sessionToLog));
+        setSettings(payload.settings);
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
+  }, [gateway]);
+
+  const saveSettings = useCallback(async (next: AppSettings) => {
+    const result = await gateway.saveSettings(next);
+    setSettings(result.settings);
   }, [gateway]);
 
   const createTask = useCallback(async (title: string) => {
@@ -1230,7 +1276,7 @@ export default function App() {
 
   const centerContent = (() => {
     switch (nav) {
-      case "timer":    return <TimerPanel tasks={tasks} onLogSession={handleLogSession} />;
+      case "timer":    return <TimerPanel tasks={tasks} onLogSession={handleLogSession} durations={durations} />;
       case "tasks":    return (
         <TasksPanel
           tasks={tasks}
@@ -1241,7 +1287,7 @@ export default function App() {
         />
       );
       case "stats":    return <StatsPage  logs={logs} sessionCount={logs.length} />;
-      case "settings": return <SettingsPanel />;
+      case "settings": return <SettingsPanel settings={settings} onSaveSettings={saveSettings} />;
     }
   })();
 
