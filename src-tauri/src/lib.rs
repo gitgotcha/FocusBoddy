@@ -3,9 +3,11 @@ use std::sync::Mutex;
 use rusqlite::Connection;
 use tauri::Manager;
 
+pub mod commands;
 pub mod db;
 pub mod error;
 pub mod models;
+pub mod repository;
 
 /// Managed Tauri state: the single SQLite connection shared by every command.
 pub struct AppState {
@@ -27,7 +29,13 @@ pub fn run() {
             app.manage(AppState { db: Mutex::new(conn) });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![health_check])
+        .invoke_handler(tauri::generate_handler![
+            health_check,
+            commands::bootstrap_app,
+            commands::create_task,
+            commands::update_task,
+            commands::delete_task,
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run Abyssal Reverie");
 }

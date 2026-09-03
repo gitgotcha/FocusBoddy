@@ -262,6 +262,38 @@ pub struct Statistics {
     pub by_project: Vec<ProjectStat>,
 }
 
+// ─── Command payloads ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTaskInput {
+    pub title: String,
+    pub pomodoro_target: i64,
+    pub priority: TaskPriority,
+    pub project: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTaskInput {
+    pub id: String,
+    pub title: Option<String>,
+    pub pomodoro_target: Option<i64>,
+    pub priority: Option<TaskPriority>,
+    pub project: Option<String>,
+    pub done: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapPayload {
+    pub tasks: Vec<Task>,
+    pub settings: AppSettings,
+    pub timer: TimerSnapshot,
+    pub sessions: Vec<TimerSession>,
+    pub statistics: Statistics,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
