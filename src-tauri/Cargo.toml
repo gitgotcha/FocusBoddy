@@ -1,0 +1,18 @@
+[package]
+name = "abyssal-reverie"
+version = "1.0.0"
+description = "Abyssal Reverie offline focus timer"
+authors = ["Abyssal Reverie"]
+edition = "2021"
+
+[lib]
+name = "abyssal_reverie_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
