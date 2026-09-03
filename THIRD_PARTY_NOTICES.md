@@ -7,9 +7,10 @@
 - 来源：Pexels 视频页面/资源 ID 4938208
 - 下载地址：`https://videos.pexels.com/video-files/4938208/4938208-hd_1920_1080_25fps.mp4`
 - Poster 地址：`https://images.pexels.com/videos/4938208/apartment-apartment-building-at-sea-beach-4938208.jpeg`
+- 实际本地文件：`public/media/ocean-poster.jpg`（源响应为 JPEG，未伪装成 WebP）
 - 下载日期：2026-09-03
 - 许可：Pexels License（请在正式公开分发前再次核对当前许可条款和素材作者信息）
-- 说明：资源仅作为本地离线应用素材随安装包提供，不在运行时联网请求。
+- 说明：资源仅作为本地离线应用素材随安装包提供，不在运行时联网请求。视频尚未重新编码，必须在 Windows 环境具备 `ffprobe`/`ffmpeg` 后完成编码、无音轨和首尾循环验收。
 
 ## Inter
 
@@ -32,7 +33,7 @@
 ## 完成提示音
 
 - 来源：akx/Notifications GitHub repository
-- 实际本地文件：`public/audio/focus-complete.wav`
+- 实际本地文件：`public/audio/focus-complete.wav`（使用 WAV，未伪装成 MP3）
 - 下载地址：`https://raw.githubusercontent.com/akx/Notifications/master/WAV/Reverie.wav`
 - 下载日期：2026-09-03
 - 许可证：CC0 Public Domain 或 CC Attribution 3.0 Unported（二选一）
