@@ -301,6 +301,46 @@ pub struct SaveSettingsResult {
     pub timer: TimerSnapshot,
 }
 
+// ─── Timer command payloads ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimerRevisionInput {
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTimerInput {
+    pub expected_revision: i64,
+    pub mode: TimerMode,
+    pub selected_task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchTimerModeInput {
+    pub expected_revision: i64,
+    pub mode: TimerMode,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteTimerInput {
+    pub expected_revision: i64,
+    pub active_session_id: String,
+    pub recovery: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteTimerResult {
+    pub timer: TimerSnapshot,
+    pub session: TimerSession,
+    pub statistics: Statistics,
+    pub newly_completed: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

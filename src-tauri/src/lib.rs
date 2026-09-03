@@ -8,6 +8,7 @@ pub mod db;
 pub mod error;
 pub mod models;
 pub mod repository;
+pub mod timer;
 
 /// Managed Tauri state: the single SQLite connection shared by every command.
 pub struct AppState {
@@ -36,6 +37,12 @@ pub fn run() {
             commands::update_task,
             commands::delete_task,
             commands::save_settings,
+            commands::start_timer,
+            commands::pause_timer,
+            commands::resume_timer,
+            commands::reset_timer,
+            commands::switch_timer_mode,
+            commands::complete_timer,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Abyssal Reverie");
