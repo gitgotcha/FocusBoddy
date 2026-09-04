@@ -7,9 +7,11 @@ import { useAppGateway } from "./services/gatewayContext";
 // ─── Types ────────────────────────────────────────────────────────────────────
 type NavSection = "timer" | "tasks" | "stats" | "settings";
 
-/** A completed session rendered in the activity list. */
+/** A session rendered in the activity list (completed or abandoned). */
 interface SessionLog {
   id: string; time: string; duration: number; task: string;
+  mode: TimerMode;
+  status: "completed" | "abandoned";
 }
 
 // ─── Design Tokens ────────────────────────────────────────────────────────────
@@ -144,7 +146,14 @@ function sessionToLog(session: TimerSession): SessionLog {
     time: `${pad(at.getHours())}:${pad(at.getMinutes())}`,
     duration: Math.round(session.focusedSeconds / 60),
     task: session.taskTitleSnapshot,
+    mode: session.mode,
+    status: session.status,
   };
+}
+
+/** Only completed focus sessions count toward goals and stats (spec §6). */
+function isCountedFocus(log: SessionLog): boolean {
+  return log.mode === "focus" && log.status === "completed";
 }
 
 function chineseDate() {
@@ -562,7 +571,10 @@ function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, onSwitc
 
         {/* Controls */}
         <div className="su-2 surface-up" style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <button onClick={handleReset} title="重置" aria-label="重置计时" className="btn-ctrl" style={ctrlBtn}>
+          <button onClick={handleReset}
+            title={state === "running" || state === "paused" ? "结束本次（不计入统计）" : "重置"}
+            aria-label={state === "running" || state === "paused" ? "结束本次（不计入统计）" : "重置计时"}
+            className="btn-ctrl" style={ctrlBtn}>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M2 7a5 5 0 1 0 1-3H1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
               <path d="M1 4V7H4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
@@ -978,7 +990,8 @@ function MiniBar({ value, max, color }: { value: number; max: number; color: str
 function StatsPanel({ logs, sessionCount, stats }:
   { logs: SessionLog[]; sessionCount: number; stats: Statistics | null }) {
 
-  const todayMinutes = logs.reduce((s,l) => s+l.duration, 0);
+  // "时长" counts completed focus sessions only (breaks/abandoned excluded).
+  const todayMinutes = logs.filter(isCountedFocus).reduce((s,l) => s+l.duration, 0);
   const dailyGoal    = stats?.dailyGoal ?? DEFAULT_SETTINGS.dailyGoal;
   const goalProgress = Math.min(1, sessionCount/dailyGoal);
 
@@ -1113,6 +1126,20 @@ function StatsPanel({ logs, sessionCount, stats }:
                         background:"rgba(8,13,18,0.35)", borderRadius:3,
                         padding:"1px 4px", border:`1px solid ${C.hairlineStr}`,
                       }}>{log.duration}m</span>
+                      {log.status === "abandoned" && (
+                        <span style={{
+                          fontFamily:"var(--font-sans)", fontSize:8, color:"rgba(195,212,218,0.55)",
+                          background:"rgba(8,13,18,0.35)", borderRadius:3,
+                          padding:"1px 4px", border:`1px solid ${C.hairline}`,
+                        }}>已中止 · 不计入</span>
+                      )}
+                      {log.mode !== "focus" && log.status === "completed" && (
+                        <span style={{
+                          fontFamily:"var(--font-sans)", fontSize:8, color:C.textMuted,
+                          background:"rgba(8,13,18,0.35)", borderRadius:3,
+                          padding:"1px 4px", border:`1px solid ${C.hairline}`,
+                        }}>休息</span>
+                      )}
                     </div>
                     <span style={{ fontSize:10, fontFamily:"var(--font-sans)", lineHeight:1.4, color: isFresh ? "#FFFFFF" : "rgba(220,232,236,0.65)" }}>{log.task}</span>
                   </div>
@@ -1243,7 +1270,7 @@ function StatsPage({ logs, sessionCount, stats }:
             <table style={{ width:"100%", borderCollapse:"collapse" }}>
               <thead>
                 <tr>
-                  {["时间","任务","时长"].map(h => (
+                  {["时间","任务","时长","状态"].map(h => (
                     <th key={h} style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", textAlign:"left", padding:"0 0 7px", fontWeight:400, borderBottom:`0.5px solid ${C.hairline}` }}>{h}</th>
                   ))}
                 </tr>
@@ -1254,6 +1281,9 @@ function StatsPage({ logs, sessionCount, stats }:
                     <td style={{ padding:"7px 0", fontFamily:"var(--font-mono)", fontSize:10, color:"rgba(158,173,178,0.62)", borderBottom:`0.5px solid ${C.hairline}` }}>{log.time}</td>
                     <td style={{ padding:"7px 0", fontSize:11, color:C.textSec, fontFamily:"var(--font-sans)", borderBottom:`0.5px solid ${C.hairline}` }}>{log.task}</td>
                     <td style={{ padding:"7px 0", fontFamily:"var(--font-mono)", fontSize:10, color:C.textMuted, borderBottom:`0.5px solid ${C.hairline}` }}>{log.duration}m</td>
+                    <td style={{ padding:"7px 0", fontFamily:"var(--font-sans)", fontSize:10, borderBottom:`0.5px solid ${C.hairline}`, color: log.status === "abandoned" ? "rgba(195,212,218,0.45)" : C.textMuted }}>
+                      {log.status === "abandoned" ? "已中止 · 不计入" : log.mode === "focus" ? "已完成" : "休息 · 不计入"}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1360,7 +1390,20 @@ export default function App() {
 
   const handlePause = useCallback(() => { runRevisionAction("pause").catch(resync); }, [runRevisionAction, resync]);
   const handleResume = useCallback(() => { runRevisionAction("resume").catch(resync); }, [runRevisionAction, resync]);
-  const handleReset = useCallback(() => { runRevisionAction("reset").catch(resync); refreshStats(); }, [runRevisionAction, resync, refreshStats]);
+
+  // Reset (= end/abandon the session) refreshes both the activity log and the
+  // statistics: the abandoned attempt is stored but never counted (spec §6).
+  const handleReset = useCallback(() => {
+    runRevisionAction("reset")
+      .then(() => gateway.listSessions({ limit: 50 }))
+      .then(sessions => { setLogs(sessions.map(sessionToLog)); })
+      .catch(resync);
+    refreshStats();
+  }, [runRevisionAction, gateway, resync, refreshStats]);
+
+  // Goal ring / today minutes: completed focus sessions only.
+  const countedFocusLogs = logs.filter(isCountedFocus);
+  const focusSessionCount = countedFocusLogs.length;
 
   const handleSwitchMode = useCallback((mode: TimerMode) => {
     const cur = timerRef.current;
@@ -1448,7 +1491,7 @@ export default function App() {
           onCyclePriority={cyclePriority}
         />
       );
-      case "stats":    return <StatsPage  logs={logs} sessionCount={logs.length} stats={weekStats} />;
+      case "stats":    return <StatsPage  logs={logs} sessionCount={focusSessionCount} stats={weekStats} />;
       case "settings": return <SettingsPanel settings={settings} onSaveSettings={saveSettings} />;
     }
   })();
