@@ -58,8 +58,9 @@
 ---
 
 ## 数据保留说明（R1-05，已澄清）
-- 用户数据（`abyssal-reverie.sqlite` + 会话/任务/设置）位于 Tauri `app_data_dir`，即
-  `C:\Users\<用户>\AppData\Roaming\abyssal-reverie\`，**独立于安装目录**。
+- 用户数据（`abyssal-reverie.sqlite` + 会话/任务/设置）位于 Tauri `app_data_dir`。
+  Tauri 2 在 Windows 上解析为 `data_dir()/${bundle_identifier}`（已核对 tauri-2.11.5 源码 `path/desktop.rs`），即
+  `C:\Users\<用户>\AppData\Roaming\com.abyssalreverie.focus\abyssal-reverie.sqlite`（目录名是 **bundle identifier**，非产品名），**独立于安装目录**。
 - **升级**：NSIS 就地升级只替换安装目录内的文件，不动 `appData` → 数据保留。
 - **卸载**：Tauri NSIS 默认**不删除** `appData`（位于 Roaming，非安装路径）→ 用户数据保留；如需彻底清除，需手动删除上述目录。
 - 因此「升级/卸载数据保留」默认满足，仅作说明，不额外实现。

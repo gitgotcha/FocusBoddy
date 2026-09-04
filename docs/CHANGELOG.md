@@ -18,7 +18,7 @@ Tauri 2.11.5 + React 19 + TypeScript + Rust + SQLite（rusqlite bundled）。
 - **全局快捷键**：`Ctrl+Alt+Space` 全局开始/暂停；被其它程序占用时启动不崩溃，应用内显示警告横幅，热键降级禁用。
 
 ### 数据
-- **本地存储**：SQLite 于 `%APPDATA%\abyssal-reverie\`（独立于安装目录，升级/卸载均保留）；WAL + 外键 + CHECK 约束。
+- **本地存储**：SQLite 于 `%APPDATA%\com.abyssalreverie.focus\`（bundle identifier 目录，独立于安装目录，升级/卸载均保留）；WAL + 外键 + CHECK 约束。
 - **损坏自愈（v1.0.0 新增）**：启动时 `PRAGMA integrity_check`；损坏库自动重命名为 `.corrupt-<时间戳>` 保留以便人工恢复，应用照常以全新库启动。
 - **导入导出（v1.0.0 新增）**：全量备份 JSON（含 schemaVersion 校验，旧版备份可导入）、会话 CSV（RFC-4180）；错误导入全量校验后拒绝，绝不覆盖现有数据。
 - **schema 迁移**：`user_version` 驱动，v1→v2 就地升级（reduce_motion 列），数据无损。
