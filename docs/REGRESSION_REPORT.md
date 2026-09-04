@@ -1,5 +1,39 @@
 # Abyssal Reverie — 发布回归测试报告
 
+---
+
+## v1.1.0 本地体验前置改造回归（2026-09-05，分支 feature-v1.1-local-prerequisites）
+
+依据规格「本地体验前置改造设计」与两轮评审（6 阻断 + 10 建议）执行，阶段 A–G 全部完成。
+
+### 修正记录（评审阻断项）
+| 评审项 | 落点 |
+|---|---|
+| #1 迁移顺序/外键 | A2 rename-first 单事务迁移，foreign_key_check 清零 |
+| #2 损坏 ≠ 迁移失败 | A0 分流 + MigrationError + 升级前 .pre-v3 副本 |
+| #3 开始时标签快照 | C3 start_timer 冻结 → 结算复制 |
+| #4 finalize 终态策略 | C1 elapsed→done / manual→idle / reset 独立 |
+| #5 竞争幂等先行 | C2 按 session_id 先查 + 双向并发测试 |
+| #6 导出漏 too_short | D2 导出强制 all + 往返测试 |
+
+### 阶段与测试
+- A 迁移：schema v3（tags/默认标签/资格字段/CHECK 集），v1/v2 真实库演练通过（3 任务 19 会话）
+- B 标签：CRUD/重命名/排序/安全删除/硬上限 100
+- C 计时：finish_timer 幂等先行、30 秒资格（ceil 等价 ms 阈值）、reset 内部落库、switch CONFLICT（D-2）
+- D 备份：v2 版本头优先（v1 独立 DTO 兼容导入）、CSV 5 新列、隐藏记录往返保留
+- E/F 前端：纯机械拆分（App.tsx 1814→约 550 行）→ DurationStepper/三按钮/结束流/TagManager/活动栏/统计权威化/byTag/密度
+- 门禁：cargo test **95 passed**（+1 ignored 真实库演练）；tsc 0；vitest **24 passed**；cargo release EXE 构建 ✓
+
+### 交付物
+- 便携版：`src-tauri/target/release/abyssal-reverie.exe`（12,176,384 字节，SHA-256 `ad92e6ede1d28029adae6e6251454086ea8d2ba648891d1df8c1096c964ccdc2`）
+- NSIS 安装包：**待构建**——本环境 wmic.exe 被沙箱黑名单拦截（需用户移除后执行 `pnpm tauri build`）
+- 文档：CHANGELOG v1.1.0、KNOWN_ISSUES KI-08~10、ACCEPTANCE_GUIDE H1–H8
+
+### 待办
+- 用户实机验收（ACCEPTANCE_GUIDE H 组 + 既有 A–G 组）
+- wmic 白名单后构建正式 NSIS 安装包并补 SHA-256
+- 合入 main、打 v1.1.0、GitHub Release（推送门控）
+
 > 质量闸门（Item 4）：冻结功能范围，仅修复 P0/P1/P2 缺陷。所有 P0/P1 清零后方可发布。
 > 每轮修复后均以真实 Windows EXE 验收（非开发模式）。
 > 版本基线：`bf6413b`（Item 3 数据导出与备份）。
