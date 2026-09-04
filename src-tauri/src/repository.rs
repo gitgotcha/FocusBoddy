@@ -30,10 +30,16 @@ pub const MAX_DAILY_GOAL: i64 = 50;
 pub const EXPORT_APP_NAME: &str = "abyssal-reverie";
 pub const EXPORT_SCHEMA_VERSION: u32 = 1;
 
-const TASK_COLUMNS: &str = "id, title, done, pomodoro_target, priority, project, sort_order, \
-                            created_at, updated_at, completed_at";
-const SESSION_COLUMNS: &str = "id, task_id, task_title_snapshot, project_snapshot, mode, status, \
-                               planned_seconds, focused_seconds, started_at, ended_at";
+const TASK_COLUMNS: &str = "id, title, done, pomodoro_target, priority, project, tag_id, \
+                            sort_order, created_at, updated_at, completed_at";
+const SESSION_COLUMNS: &str = "id, task_id, task_title_snapshot, project_snapshot, tag_id, \
+                               tag_name_snapshot, mode, status, planned_seconds, focused_seconds, \
+                               started_at, ended_at, finish_reason, statistics_eligible, \
+                               qualification_reason";
+
+/// Focus sessions shorter than this never enter statistics (v1.1 rule: 29s
+/// excluded, 30s counted). Rust is the only place this rule lives.
+pub const MIN_QUALIFYING_FOCUS_SECONDS: i64 = 30;
 
 pub fn now_millis() -> i64 {
     std::time::SystemTime::now()
@@ -89,6 +95,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         pomodoro_target: row.get("pomodoro_target")?,
         priority: TaskPriority::parse_str(&priority_text).unwrap_or(TaskPriority::Med),
         project: row.get("project")?,
+        tag_id: row.get("tag_id")?,
         sort_order: row.get("sort_order")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -99,18 +106,69 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
 fn session_from_row(row: &Row<'_>) -> rusqlite::Result<TimerSession> {
     let mode_text: String = row.get("mode")?;
     let status_text: String = row.get("status")?;
+    let eligible: i64 = row.get("statistics_eligible")?;
     Ok(TimerSession {
         id: row.get("id")?,
         task_id: row.get("task_id")?,
         task_title_snapshot: row.get("task_title_snapshot")?,
         project_snapshot: row.get("project_snapshot")?,
+        tag_id: row.get("tag_id")?,
+        tag_name_snapshot: Some(row.get("tag_name_snapshot")?),
         mode: TimerMode::parse_str(&mode_text).unwrap_or(TimerMode::Focus),
         status: SessionStatus::parse_str(&status_text).unwrap_or(SessionStatus::Abandoned),
         planned_seconds: row.get("planned_seconds")?,
         focused_seconds: row.get("focused_seconds")?,
         started_at: row.get("started_at")?,
         ended_at: row.get("ended_at")?,
+        finish_reason: Some(row.get("finish_reason")?),
+        statistics_eligible: Some(eligible != 0),
+        qualification_reason: Some(row.get("qualification_reason")?),
     })
+}
+
+/// Stable fallback tag (id, name). The fallback can be renamed but never
+/// deleted, so its id is constant; only its name may change over time.
+fn fallback_tag(conn: &Connection) -> Result<(String, String), CommandError> {
+    conn.query_row(
+        "SELECT id, name FROM tags WHERE is_fallback = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(|err| CommandError::internal(format!("fallback tag missing: {err}")))
+}
+
+/// Computes the effective qualification fields for a session being written,
+/// honoring explicit values from a v2 backup and backfilling v1-shaped data
+/// per the v1.1 rules (spec §7.3).
+fn effective_qualification(
+    session: &TimerSession,
+) -> (String, i64, String) {
+    let focused = session.focused_seconds.max(0);
+    let eligible = session.statistics_eligible.unwrap_or(
+        session.mode == TimerMode::Focus
+            && session.status == SessionStatus::Completed
+            && focused >= MIN_QUALIFYING_FOCUS_SECONDS,
+    );
+    let qualification = session.qualification_reason.clone().unwrap_or_else(|| {
+        if session.mode != TimerMode::Focus {
+            "non_focus".to_owned()
+        } else if eligible && session.status == SessionStatus::Completed {
+            "qualified".to_owned()
+        } else if session.status == SessionStatus::Abandoned {
+            if focused < MIN_QUALIFYING_FOCUS_SECONDS {
+                "too_short".to_owned()
+            } else {
+                "abandoned".to_owned()
+            }
+        } else {
+            "too_short".to_owned()
+        }
+    });
+    let finish = session
+        .finish_reason
+        .clone()
+        .unwrap_or_else(|| "legacy".to_owned());
+    (finish, if eligible { 1 } else { 0 }, qualification)
 }
 
 // ─── Tasks ───────────────────────────────────────────────────────────────────
@@ -140,6 +198,9 @@ pub fn insert_task(conn: &Connection, input: &CreateTaskInput) -> Result<Task, C
     let sort_order: i64 = conn
         .query_row("SELECT COALESCE(MAX(sort_order) + 1, 0) FROM tasks", [], |row| row.get(0))
         .unwrap_or(0);
+    // F4 will let the user pick the tag; until then every new task lands on
+    // the fallback tag.
+    let (fallback_id, _fallback_name) = fallback_tag(conn)?;
 
     let task = Task {
         id: Uuid::new_v4().to_string(),
@@ -148,6 +209,7 @@ pub fn insert_task(conn: &Connection, input: &CreateTaskInput) -> Result<Task, C
         pomodoro_target: input.pomodoro_target,
         priority: input.priority,
         project: clean_project(&input.project),
+        tag_id: fallback_id,
         sort_order,
         created_at: now,
         updated_at: now,
@@ -155,9 +217,9 @@ pub fn insert_task(conn: &Connection, input: &CreateTaskInput) -> Result<Task, C
     };
 
     conn.execute(
-        "INSERT INTO tasks (id, title, done, pomodoro_target, priority, project, sort_order,
-                            created_at, updated_at, completed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO tasks (id, title, done, pomodoro_target, priority, project, tag_id,
+                            sort_order, created_at, updated_at, completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             task.id,
             task.title,
@@ -165,6 +227,7 @@ pub fn insert_task(conn: &Connection, input: &CreateTaskInput) -> Result<Task, C
             task.pomodoro_target,
             task.priority.as_str(),
             task.project,
+            task.tag_id,
             task.sort_order,
             task.created_at,
             task.updated_at,
@@ -343,9 +406,10 @@ fn write_timer(conn: &Connection, timer: &TimerSnapshot) -> Result<(), CommandEr
     conn.execute(
         "UPDATE timer_state SET mode = ?1, state = ?2, active_session_id = ?3,
                                 selected_task_id = ?4, task_title_snapshot = ?5,
-                                project_snapshot = ?6, duration_seconds = ?7,
-                                remaining_seconds = ?8, started_at = ?9, target_end_at = ?10,
-                                paused_at = ?11, revision = ?12, updated_at = ?13
+                                project_snapshot = ?6, tag_id = ?7, tag_name_snapshot = ?8,
+                                duration_seconds = ?9, remaining_seconds = ?10,
+                                started_at = ?11, target_end_at = ?12,
+                                paused_at = ?13, revision = ?14, updated_at = ?15
          WHERE id = 1",
         params![
             timer.mode.as_str(),
@@ -354,6 +418,8 @@ fn write_timer(conn: &Connection, timer: &TimerSnapshot) -> Result<(), CommandEr
             timer.selected_task_id,
             timer.task_title_snapshot,
             timer.project_snapshot,
+            timer.tag_id,
+            timer.tag_name_snapshot,
             timer.duration_seconds,
             timer.remaining_seconds,
             timer.started_at,
@@ -369,8 +435,8 @@ fn write_timer(conn: &Connection, timer: &TimerSnapshot) -> Result<(), CommandEr
 pub fn get_timer(conn: &Connection) -> Result<TimerSnapshot, CommandError> {
     conn.query_row(
         "SELECT mode, state, active_session_id, selected_task_id, task_title_snapshot,
-                project_snapshot, duration_seconds, remaining_seconds, started_at, target_end_at,
-                paused_at, revision, updated_at
+                project_snapshot, tag_id, tag_name_snapshot, duration_seconds, remaining_seconds,
+                started_at, target_end_at, paused_at, revision, updated_at
          FROM timer_state WHERE id = 1",
         [],
         |row| {
@@ -383,13 +449,15 @@ pub fn get_timer(conn: &Connection) -> Result<TimerSnapshot, CommandError> {
                 selected_task_id: row.get(3)?,
                 task_title_snapshot: row.get(4)?,
                 project_snapshot: row.get(5)?,
-                duration_seconds: row.get(6)?,
-                remaining_seconds: row.get(7)?,
-                started_at: row.get(8)?,
-                target_end_at: row.get(9)?,
-                paused_at: row.get(10)?,
-                revision: row.get(11)?,
-                updated_at: row.get(12)?,
+                tag_id: row.get(6)?,
+                tag_name_snapshot: row.get(7)?,
+                duration_seconds: row.get(8)?,
+                remaining_seconds: row.get(9)?,
+                started_at: row.get(10)?,
+                target_end_at: row.get(11)?,
+                paused_at: row.get(12)?,
+                revision: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         },
     )
@@ -431,58 +499,98 @@ fn live_remaining(timer: &TimerSnapshot, now: i64) -> i64 {
 
 /// Writes a finished (completed or abandoned) session for a timer that was
 /// started. Uses the timer's `active_session_id` so the session is traceable
-/// to its start.
+/// to its start. The tag snapshot comes from the timer (frozen at start) with
+/// the fallback tag as a safety net.
 fn write_finished_session(
     conn: &Connection,
     timer: &TimerSnapshot,
     now: i64,
     status: SessionStatus,
     focused_seconds: i64,
+    finish_reason: &str,
 ) -> Result<(), CommandError> {
     let session_id = timer
         .active_session_id
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let focused = focused_seconds.max(0);
+    // Reset-created sessions are internal by ruling: never eligible, never in
+    // the activity view, only preserved in full exports.
+    let eligible =
+        timer.mode == TimerMode::Focus && status == SessionStatus::Completed && focused >= MIN_QUALIFYING_FOCUS_SECONDS;
+    let qualification = if timer.mode != TimerMode::Focus {
+        "non_focus"
+    } else if status == SessionStatus::Abandoned {
+        if focused < MIN_QUALIFYING_FOCUS_SECONDS {
+            "too_short"
+        } else {
+            "abandoned"
+        }
+    } else if eligible {
+        "qualified"
+    } else {
+        "too_short"
+    };
+    let (fallback_id, fallback_name) = fallback_tag(conn)?;
     let session = TimerSession {
         id: session_id,
         task_id: timer.selected_task_id.clone(),
         task_title_snapshot: timer.task_title_snapshot.clone().unwrap_or_default(),
         project_snapshot: timer.project_snapshot.clone().unwrap_or_default(),
+        tag_id: Some(timer.tag_id.clone().unwrap_or_else(|| fallback_id.clone())),
+        tag_name_snapshot: Some(
+            timer
+                .tag_name_snapshot
+                .clone()
+                .unwrap_or_else(|| fallback_name.clone()),
+        ),
         mode: timer.mode,
         status,
         planned_seconds: timer.duration_seconds,
-        focused_seconds: focused_seconds.max(0),
+        focused_seconds: focused,
         started_at: timer.started_at.unwrap_or(now),
         ended_at: now,
+        finish_reason: Some(finish_reason.to_owned()),
+        statistics_eligible: Some(eligible),
+        qualification_reason: Some(qualification.to_owned()),
     };
     conn.execute(
-        "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
-                               status, planned_seconds, focused_seconds, started_at, ended_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                               tag_name_snapshot, mode, status, planned_seconds,
+                               focused_seconds, started_at, ended_at, finish_reason,
+                               statistics_eligible, qualification_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             session.id,
             session.task_id,
             session.task_title_snapshot,
             session.project_snapshot,
+            session.tag_id,
+            session.tag_name_snapshot,
             session.mode.as_str(),
             session.status.as_str(),
             session.planned_seconds,
             session.focused_seconds,
             session.started_at,
             session.ended_at,
+            finish_reason,
+            eligible as i64,
+            qualification,
         ],
     )?;
     Ok(())
 }
 
-/// Writes an abandoned (uncounted) session for a timer the user stopped.
-fn write_abandoned_session(
+/// Writes the internal record a user-initiated reset produces (v1.1 ruling):
+/// abandoned, `finish_reason = reset`, never eligible, hidden from the
+/// activity view, preserved only in full exports.
+fn write_reset_session(
     conn: &Connection,
     timer: &TimerSnapshot,
     now: i64,
 ) -> Result<(), CommandError> {
     let focused = timer.duration_seconds - timer.remaining_seconds;
-    write_finished_session(conn, timer, now, SessionStatus::Abandoned, focused)
+    write_finished_session(conn, timer, now, SessionStatus::Abandoned, focused, "reset")
 }
 
 /// Checks that the timer's revision matches `expected_revision`, else CONFLICT.
@@ -519,6 +627,21 @@ pub fn start_timer(
         _ => None,
     };
     let (title_snap, project_snap) = snapshot_for_mode(input.mode, task.as_ref());
+    // v1.1: freeze the tag alongside title/project. A selected task donates
+    // its tag; breaks and no-task rounds use the fallback tag. Mid-run tag
+    // changes never alter this snapshot.
+    let (tag_id, tag_name) = match (&input.selected_task_id, input.mode) {
+        (Some(id), TimerMode::Focus) => {
+            let task = task.as_ref().expect("task resolved above");
+            let name: String = tx.query_row(
+                "SELECT name FROM tags WHERE id = ?1",
+                params![task.tag_id],
+                |row| row.get(0),
+            )?;
+            (task.tag_id.clone(), name)
+        }
+        _ => fallback_tag(&tx)?,
+    };
     let duration = settings.duration_seconds_for_mode(input.mode);
     let now = now_millis();
     let session_id = Uuid::new_v4().to_string();
@@ -529,6 +652,8 @@ pub fn start_timer(
     timer.selected_task_id = input.selected_task_id.clone();
     timer.task_title_snapshot = Some(title_snap);
     timer.project_snapshot = Some(project_snap);
+    timer.tag_id = Some(tag_id);
+    timer.tag_name_snapshot = Some(tag_name);
     timer.duration_seconds = duration;
     timer.remaining_seconds = duration;
     timer.started_at = Some(now);
@@ -622,7 +747,7 @@ pub fn reset_timer(
             TimerState::Running => live_remaining(&timer, now),
             _ => timer.remaining_seconds,
         };
-        write_abandoned_session(&tx, &timer, now)?;
+        write_reset_session(&tx, &timer, now)?;
     }
 
     let duration = settings.duration_seconds_for_mode(timer.mode);
@@ -644,10 +769,11 @@ pub fn reset_timer(
     Ok(timer)
 }
 
-/// `switch_timer_mode`: any → idle (new mode). If a session was started, the
-/// elapsed time is SUBMITTED as a completed session (user request 2026-09-04:
-/// switching to a break must inherit the accumulated time instead of
-/// discarding it as abandoned). Bumps revision.
+/// `switch_timer_mode`: idle/done → idle (new mode). Defensive against stale
+/// frontends: an active (running/paused) timer must never be switched — the
+/// v1.1 UI disables the buttons and this returns CONFLICT (decision D-2,
+/// superseding the v1.0.0 "switch submits elapsed" behavior). No session is
+/// created for a legal switch; the revision only advances on success.
 pub fn switch_timer_mode(
     conn: &mut Connection,
     settings: &AppSettings,
@@ -657,17 +783,11 @@ pub fn switch_timer_mode(
     let mut timer = get_timer(&tx)?;
     check_revision(&timer, input.expected_revision)?;
 
-    let now = now_millis();
-    let started = timer.state != TimerState::Idle
-        && timer.active_session_id.is_some()
-        && timer.started_at.is_some();
-
-    if started {
-        let focused = match timer.state {
-            TimerState::Running => timer.duration_seconds - live_remaining(&timer, now),
-            _ => timer.duration_seconds - timer.remaining_seconds,
-        };
-        write_finished_session(&tx, &timer, now, SessionStatus::Completed, focused)?;
+    if timer.state != TimerState::Idle && timer.state != TimerState::Done {
+        return Err(CommandError::conflict(format!(
+            "cannot switch mode while a timer is {:?}; finish or reset it first",
+            timer.state
+        )));
     }
 
     let duration = settings.duration_seconds_for_mode(input.mode);
@@ -677,13 +797,15 @@ pub fn switch_timer_mode(
     timer.selected_task_id = None;
     timer.task_title_snapshot = None;
     timer.project_snapshot = None;
+    timer.tag_id = None;
+    timer.tag_name_snapshot = None;
     timer.duration_seconds = duration;
     timer.remaining_seconds = duration;
     timer.started_at = None;
     timer.target_end_at = None;
     timer.paused_at = None;
     timer.revision += 1;
-    timer.updated_at = now;
+    timer.updated_at = now_millis();
 
     write_timer(&tx, &timer)?;
     tx.commit()?;
@@ -754,38 +876,65 @@ pub fn complete_timer(
     // 4: Compute focused time from target_end_at (drift-free).
     let now = now_millis();
     let actual_remaining = live_remaining(&timer, now);
-    let focused = timer.duration_seconds - actual_remaining;
+    let focused = (timer.duration_seconds - actual_remaining).max(0);
+    // 30-second qualification lives here and nowhere else (v1.1 §8.2).
+    let eligible = timer.mode == TimerMode::Focus && focused >= MIN_QUALIFYING_FOCUS_SECONDS;
+    let qualification = if timer.mode != TimerMode::Focus {
+        "non_focus"
+    } else if eligible {
+        "qualified"
+    } else {
+        "too_short"
+    };
+    let (fallback_id, fallback_name) = fallback_tag(&tx)?;
 
     let session = TimerSession {
         id: input.active_session_id.clone(),
         task_id: timer.selected_task_id.clone(),
         task_title_snapshot: timer.task_title_snapshot.clone().unwrap_or_else(|| NO_TASK_TITLE.to_owned()),
         project_snapshot: timer.project_snapshot.clone().unwrap_or_else(|| NO_TASK_PROJECT.to_owned()),
+        tag_id: Some(timer.tag_id.clone().unwrap_or_else(|| fallback_id.clone())),
+        tag_name_snapshot: Some(
+            timer
+                .tag_name_snapshot
+                .clone()
+                .unwrap_or_else(|| fallback_name.clone()),
+        ),
         mode: timer.mode,
         status: SessionStatus::Completed,
         planned_seconds: timer.duration_seconds,
-        focused_seconds: focused.max(0),
+        focused_seconds: focused,
         started_at: timer.started_at.unwrap_or(now),
         ended_at: now,
+        finish_reason: Some("elapsed".to_owned()),
+        statistics_eligible: Some(eligible),
+        qualification_reason: Some(qualification.to_owned()),
     };
 
     // 4: INSERT with ON CONFLICT DO NOTHING so a duplicate insert is a no-op.
     let inserted = tx.execute(
-        "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
-                               status, planned_seconds, focused_seconds, started_at, ended_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                               tag_name_snapshot, mode, status, planned_seconds,
+                               focused_seconds, started_at, ended_at, finish_reason,
+                               statistics_eligible, qualification_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(id) DO NOTHING",
         params![
             session.id,
             session.task_id,
             session.task_title_snapshot,
             session.project_snapshot,
+            session.tag_id,
+            session.tag_name_snapshot,
             session.mode.as_str(),
             session.status.as_str(),
             session.planned_seconds,
             session.focused_seconds,
             session.started_at,
             session.ended_at,
+            "elapsed",
+            eligible as i64,
+            qualification,
         ],
     )?;
 
@@ -921,14 +1070,15 @@ pub fn get_statistics(
 ) -> Result<Statistics, CommandError> {
     validate_day_boundaries(query)?;
 
-    // Collect completed focus sessions in range.
+    // Collect completed focus sessions in range. Only statistics-eligible
+    // sessions count (v1.1: 30-second rule + abandoned never counted).
     let mut stmt = conn.prepare(
-        "SELECT id, task_id, task_title_snapshot, project_snapshot, mode, status,
-                planned_seconds, focused_seconds, started_at, ended_at
-         FROM sessions
-         WHERE mode = 'focus' AND status = 'completed'
-           AND started_at >= ?1 AND started_at <= ?2
-         ORDER BY started_at ASC",
+        &format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions
+             WHERE mode = 'focus' AND status = 'completed' AND statistics_eligible = 1
+               AND started_at >= ?1 AND started_at <= ?2
+             ORDER BY started_at ASC"
+        ),
     )?;
     let sessions: Vec<TimerSession> = stmt
         .query_map(params![query.from, query.to], session_from_row)?
@@ -1115,13 +1265,14 @@ pub fn import_data(conn: &mut Connection, bundle: &ExportBundle) -> Result<Impor
     let now = now_millis();
     let tx = conn.transaction()?;
 
-    // Replace tasks (ids preserved from the backup).
+    // Replace tasks (ids preserved from the backup; tag_id defaults to the
+    // fallback tag for v1 backups via the model's serde default).
     tx.execute("DELETE FROM tasks", [])?;
     for task in &bundle.tasks {
         tx.execute(
-            "INSERT INTO tasks (id, title, done, pomodoro_target, priority, project, sort_order,
-                                created_at, updated_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO tasks (id, title, done, pomodoro_target, priority, project, tag_id,
+                                sort_order, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 task.id,
                 task.title,
@@ -1129,6 +1280,7 @@ pub fn import_data(conn: &mut Connection, bundle: &ExportBundle) -> Result<Impor
                 task.pomodoro_target,
                 task.priority.as_str(),
                 task.project,
+                task.tag_id,
                 task.sort_order,
                 task.created_at,
                 task.updated_at,
@@ -1137,24 +1289,37 @@ pub fn import_data(conn: &mut Connection, bundle: &ExportBundle) -> Result<Impor
         )?;
     }
 
-    // Replace sessions (ids preserved from the backup).
+    // Replace sessions (ids preserved from the backup). v1-shaped sessions
+    // (missing qualification fields) are backfilled per the v1.1 rules.
     tx.execute("DELETE FROM sessions", [])?;
     for session in &bundle.sessions {
+        let (finish, eligible, qualification) = effective_qualification(session);
+        let (fallback_id, fallback_name) = fallback_tag(&tx)?;
         tx.execute(
-            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
-                                   status, planned_seconds, focused_seconds, started_at, ended_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                                   tag_name_snapshot, mode, status, planned_seconds,
+                                   focused_seconds, started_at, ended_at, finish_reason,
+                                   statistics_eligible, qualification_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 session.id,
                 session.task_id,
                 session.task_title_snapshot,
                 session.project_snapshot,
+                session.tag_id.clone().unwrap_or_else(|| fallback_id.clone()),
+                session
+                    .tag_name_snapshot
+                    .clone()
+                    .unwrap_or_else(|| fallback_name.clone()),
                 session.mode.as_str(),
                 session.status.as_str(),
                 session.planned_seconds,
                 session.focused_seconds,
                 session.started_at,
                 session.ended_at,
+                finish,
+                eligible,
+                qualification,
             ],
         )?;
     }
@@ -1261,11 +1426,35 @@ mod tests {
         project: &str,
         focused_seconds: i64,
     ) {
+        let (fallback_id, fallback_name) = fallback_tag(conn).expect("fallback tag");
+        let eligible = mode == TimerMode::Focus
+            && status == SessionStatus::Completed
+            && focused_seconds >= MIN_QUALIFYING_FOCUS_SECONDS;
         conn.execute(
-            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
-                                   status, planned_seconds, focused_seconds, started_at, ended_at)
-             VALUES (?1, NULL, 'snapshot', ?2, ?3, ?4, 1500, ?5, 1, 2)",
-            params![id, project, mode.as_str(), status.as_str(), focused_seconds],
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                                   tag_name_snapshot, mode, status, planned_seconds,
+                                   focused_seconds, started_at, ended_at, finish_reason,
+                                   statistics_eligible, qualification_reason)
+             VALUES (?1, NULL, 'snapshot', ?2, ?3, ?4, ?5, ?6, 1500, ?7, 1, 2, 'legacy', ?8, ?9)",
+            params![
+                id,
+                project,
+                fallback_id,
+                fallback_name,
+                mode.as_str(),
+                status.as_str(),
+                focused_seconds,
+                eligible as i64,
+                if mode != TimerMode::Focus {
+                    "non_focus"
+                } else if eligible {
+                    "qualified"
+                } else if status == SessionStatus::Abandoned {
+                    "abandoned"
+                } else {
+                    "too_short"
+                },
+            ],
         )
         .expect("session should insert");
     }
@@ -1510,11 +1699,26 @@ mod tests {
     // ─── Statistics tests (T9) ───────────────────────────────────────────────
 
     fn seed_completed_focus(conn: &Connection, id: &str, started_at: i64, focused: i64, project: &str) {
+        let (fallback_id, fallback_name) = fallback_tag(conn).expect("fallback tag");
+        let eligible = focused >= MIN_QUALIFYING_FOCUS_SECONDS;
         conn.execute(
-            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
-                                   status, planned_seconds, focused_seconds, started_at, ended_at)
-             VALUES (?1, NULL, 'task', ?2, 'focus', 'completed', 1500, ?3, ?4, ?5)",
-            params![id, project, focused, started_at, started_at + focused * 1000],
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                                   tag_name_snapshot, mode, status, planned_seconds,
+                                   focused_seconds, started_at, ended_at, finish_reason,
+                                   statistics_eligible, qualification_reason)
+             VALUES (?1, NULL, 'task', ?2, ?3, ?4, 'focus', 'completed', 1500, ?5, ?6, ?7,
+                     'legacy', ?8, ?9)",
+            params![
+                id,
+                project,
+                fallback_id,
+                fallback_name,
+                focused,
+                started_at,
+                started_at + focused * 1000,
+                eligible as i64,
+                if eligible { "qualified" } else { "too_short" },
+            ],
         )
         .expect("seed session");
     }
@@ -1882,7 +2086,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_mode_submits_elapsed_time_and_changes_mode() {
+    fn switch_mode_rejects_active_timer() {
         let mut conn = db::open_in_memory().expect("db");
         let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
             expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
@@ -1892,50 +2096,38 @@ mod tests {
         timer.target_end_at = Some(now_millis() + 900 * 1000);
         write_timer(&conn, &timer).expect("write");
 
-        let switched = switch_timer_mode(&mut conn, &settings(), &SwitchTimerModeInput {
+        // Running: switching is rejected (decision D-2), nothing written.
+        let conflict = switch_timer_mode(&mut conn, &settings(), &SwitchTimerModeInput {
             expected_revision: 1, mode: TimerMode::Short,
-        }).expect("switch");
+        });
+        assert!(matches!(conflict, Err(ref e) if e.code == crate::error::ErrorCode::Conflict));
 
+        // Paused: equally rejected.
+        pause_timer(&mut conn, &crate::models::TimerRevisionInput {
+            expected_revision: 1,
+        }).expect("pause");
+        let conflict = switch_timer_mode(&mut conn, &settings(), &SwitchTimerModeInput {
+            expected_revision: 2, mode: TimerMode::Long,
+        });
+        assert!(matches!(conflict, Err(ref e) if e.code == crate::error::ErrorCode::Conflict));
+
+        // No session may be created by a rejected switch.
+        let sessions = list_sessions(&conn, 10).expect("sessions");
+        assert!(sessions.is_empty());
+
+        // idle/done switches stay legal and session-free.
+        resume_timer(&mut conn, &crate::models::TimerRevisionInput {
+            expected_revision: 2,
+        }).expect("resume");
+        reset_timer(&mut conn, &settings(), &crate::models::TimerRevisionInput {
+            expected_revision: 3,
+        }).expect("reset");
+        let switched = switch_timer_mode(&mut conn, &settings(), &SwitchTimerModeInput {
+            expected_revision: 4, mode: TimerMode::Short,
+        }).expect("switch from idle");
         assert_eq!(switched.mode, TimerMode::Short);
         assert_eq!(switched.state, TimerState::Idle);
         assert_eq!(switched.duration_seconds, 300);
-        assert_eq!(switched.revision, 2);
-
-        // The elapsed focus time is submitted, not discarded.
-        let sessions = list_sessions(&conn, 10).expect("sessions");
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].status, SessionStatus::Completed);
-        assert_eq!(sessions[0].mode, TimerMode::Focus);
-        assert!(sessions[0].focused_seconds >= 590 && sessions[0].focused_seconds <= 610,
-            "expected ~600s focused, got {}", sessions[0].focused_seconds);
-
-        // And it counts toward statistics (completed focus).
-        let stats = all_time_statistics(&conn).expect("stats");
-        assert_eq!(stats.focus_session_count, 1);
-    }
-
-    #[test]
-    fn switch_mode_from_paused_submits_remaining_based_elapsed() {
-        let mut conn = db::open_in_memory().expect("db");
-        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
-            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
-        }).expect("start");
-
-        timer.remaining_seconds = 1200; // 300s focused before pausing
-        timer.state = TimerState::Paused;
-        timer.target_end_at = None;
-        timer.revision = 1;
-        write_timer(&conn, &timer).expect("write");
-
-        switch_timer_mode(&mut conn, &settings(), &SwitchTimerModeInput {
-            expected_revision: 1, mode: TimerMode::Long,
-        }).expect("switch");
-
-        let sessions = list_sessions(&conn, 10).expect("sessions");
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].status, SessionStatus::Completed);
-        assert_eq!(sessions[0].focused_seconds, 300);
-        assert_eq!(sessions[0].mode, TimerMode::Focus);
     }
 
     #[test]

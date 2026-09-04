@@ -113,6 +113,14 @@ impl SessionStatus {
 
 // ─── Persisted records ───────────────────────────────────────────────────────
 
+/// Stable id of the permanent fallback tag ("其他"), seeded by the v3 schema
+/// migration. Used to backfill tasks/sessions written before v1.1.
+pub const FALLBACK_TAG_ID: &str = "system-other";
+
+fn default_task_tag_id() -> String {
+    FALLBACK_TAG_ID.to_owned()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -122,6 +130,10 @@ pub struct Task {
     pub pomodoro_target: i64,
     pub priority: TaskPriority,
     pub project: String,
+    /// Owning primary tag. Defaults to the fallback tag for data written
+    /// before v1.1 (old backup JSON lacks the field).
+    #[serde(default = "default_task_tag_id")]
+    pub tag_id: String,
     pub sort_order: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -183,6 +195,10 @@ pub struct TimerSnapshot {
     pub selected_task_id: Option<String>,
     pub task_title_snapshot: Option<String>,
     pub project_snapshot: Option<String>,
+    /// Tag frozen when this round started (v1.1). Cleared when idle.
+    pub tag_id: Option<String>,
+    /// Tag NAME frozen when this round started — survives tag renames/deletes.
+    pub tag_name_snapshot: Option<String>,
     pub duration_seconds: i64,
     pub remaining_seconds: i64,
     pub started_at: Option<i64>,
@@ -202,6 +218,8 @@ impl TimerSnapshot {
             selected_task_id: None,
             task_title_snapshot: None,
             project_snapshot: None,
+            tag_id: None,
+            tag_name_snapshot: None,
             duration_seconds,
             remaining_seconds: duration_seconds,
             started_at: None,
@@ -220,12 +238,31 @@ pub struct TimerSession {
     pub task_id: Option<String>,
     pub task_title_snapshot: String,
     pub project_snapshot: String,
+    /// Owning tag at session time (stable id). `None` only for v1 backups —
+    /// the importer maps it to the fallback tag.
+    #[serde(default)]
+    pub tag_id: Option<String>,
+    /// Tag NAME frozen at session time — historical label, never re-tagged.
+    /// `None` only for v1 backups (imported as the current fallback name).
+    #[serde(default)]
+    pub tag_name_snapshot: Option<String>,
     pub mode: TimerMode,
     pub status: SessionStatus,
     pub planned_seconds: i64,
     pub focused_seconds: i64,
     pub started_at: i64,
     pub ended_at: i64,
+    /// Why the session ended. `None` only for v1 backups (imported as
+    /// "legacy" — the original reason is unrecoverable).
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+    /// Whether the session counts toward focus statistics. `None` only for
+    /// v1 backups (import backfills per the v1.1 qualification rules).
+    #[serde(default)]
+    pub statistics_eligible: Option<bool>,
+    /// Why the session is (in)eligible. `None` only for v1 backups.
+    #[serde(default)]
+    pub qualification_reason: Option<String>,
 }
 
 // ─── Statistics payloads ─────────────────────────────────────────────────────

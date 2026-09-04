@@ -1,13 +1,20 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 
 use crate::error::CommandError;
 use crate::models::{AppSettings, TimerMode, TimerSnapshot};
 
 /// Bump this whenever a new migration is appended to `MIGRATIONS`.
-const LATEST_SCHEMA_VERSION: u32 = 2;
+const LATEST_SCHEMA_VERSION: u32 = 3;
+
+fn unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
@@ -74,6 +81,174 @@ CREATE TABLE IF NOT EXISTS settings (
 /// tasks/sessions/settings.
 const MIGRATION_V2: &str =
     "ALTER TABLE settings ADD COLUMN reduce_motion INTEGER NOT NULL DEFAULT 0;";
+
+/// Runs the v2 → v3 migration ("local experience prerequisites", v1.1):
+///
+/// 1. creates `tags` with a permanent fallback tag and seeds the four system
+///    tags (学习/工作/生活/其他 — stable ids);
+/// 2. rebuilds `tasks` and `sessions` with tag columns and explicit finish
+///    reason / qualification fields (old tables are renamed FIRST so foreign
+///    keys never dangle; the old shapes are dropped only after the copy is
+///    verified row-for-row);
+/// 3. extends `timer_state` with the frozen tag snapshot columns;
+/// 4. backfills everything to the fallback tag — never guessing from project
+///    strings;
+/// 5. verifies `PRAGMA foreign_key_check` is clean before committing.
+///
+/// Runs entirely inside the caller's transaction; any failure rolls back and
+/// the pre-migration file (already copied aside by `open_at`) stays intact.
+fn run_v3_migration(tx: &Transaction) -> Result<(), CommandError> {
+    let now = unix_millis();
+
+    // 1) Tags: single primary tag per task, exactly one permanent fallback.
+    tx.execute_batch(
+        "CREATE TABLE tags (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            normalized_name TEXT NOT NULL UNIQUE,
+            kind            TEXT NOT NULL CHECK (kind IN ('system','custom')),
+            is_fallback     INTEGER NOT NULL CHECK (is_fallback IN (0,1)),
+            sort_order      INTEGER NOT NULL CHECK (sort_order >= 0),
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX idx_tags_single_fallback ON tags(is_fallback) WHERE is_fallback = 1;",
+    )?;
+    for (id, name, sort, fallback) in [
+        ("system-study", "学习", 0i64, 0i64),
+        ("system-work", "工作", 1, 0),
+        ("system-life", "生活", 2, 0),
+        ("system-other", "其他", 3, 1),
+    ] {
+        tx.execute(
+            "INSERT INTO tags (id, name, normalized_name, kind, is_fallback, sort_order,
+                               created_at, updated_at)
+             VALUES (?1, ?2, ?2, 'system', ?3, ?4, ?5, ?5)",
+            params![id, name, fallback, sort, now],
+        )?;
+    }
+
+    // 2) Rename old shapes first: the rename rewrites the old sessions' FK
+    //    references to `tasks_v2_old`, so dropping the old tables later can
+    //    never violate a constraint and foreign_keys stays ON throughout.
+    tx.execute_batch(
+        "ALTER TABLE tasks RENAME TO tasks_v2_old;
+         ALTER TABLE sessions RENAME TO sessions_v2_old;",
+    )?;
+
+    // 3) v3 tasks: one non-null primary tag (RESTRICT), defaulted to fallback.
+    tx.execute_batch(
+        "CREATE TABLE tasks (
+            id              TEXT PRIMARY KEY,
+            title           TEXT NOT NULL,
+            done            INTEGER NOT NULL DEFAULT 0,
+            pomodoro_target INTEGER NOT NULL DEFAULT 1,
+            priority        TEXT NOT NULL DEFAULT 'med',
+            project         TEXT NOT NULL DEFAULT '通用',
+            tag_id          TEXT NOT NULL REFERENCES tags(id) ON DELETE RESTRICT,
+            sort_order      INTEGER NOT NULL DEFAULT 0,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL,
+            completed_at    INTEGER
+        );",
+    )?;
+    tx.execute(
+        "INSERT INTO tasks (id, title, done, pomodoro_target, priority, project, tag_id,
+                            sort_order, created_at, updated_at, completed_at)
+         SELECT id, title, done, pomodoro_target, priority, project,
+                (SELECT id FROM tags WHERE is_fallback = 1),
+                sort_order, created_at, updated_at, completed_at
+         FROM tasks_v2_old",
+        [],
+    )?;
+
+    // 4) v3 sessions: tag snapshots + explicit finish reason / qualification.
+    tx.execute_batch(
+        "CREATE TABLE sessions (
+            id                  TEXT PRIMARY KEY,
+            task_id             TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+            task_title_snapshot TEXT NOT NULL,
+            project_snapshot    TEXT NOT NULL,
+            tag_id              TEXT REFERENCES tags(id) ON DELETE SET NULL,
+            tag_name_snapshot   TEXT NOT NULL,
+            mode                TEXT NOT NULL,
+            status              TEXT NOT NULL,
+            planned_seconds     INTEGER NOT NULL,
+            focused_seconds     INTEGER NOT NULL CHECK (focused_seconds >= 0),
+            started_at          INTEGER NOT NULL,
+            ended_at            INTEGER NOT NULL,
+            finish_reason       TEXT NOT NULL CHECK (finish_reason IN
+                                  ('elapsed','manual_finish','reset','mode_change','legacy')),
+            statistics_eligible INTEGER NOT NULL CHECK (statistics_eligible IN (0,1)),
+            qualification_reason TEXT NOT NULL CHECK (qualification_reason IN
+                                  ('qualified','too_short','abandoned','non_focus','legacy'))
+        );",
+    )?;
+    tx.execute(
+        "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot,
+                               tag_id, tag_name_snapshot, mode, status,
+                               planned_seconds, focused_seconds, started_at, ended_at,
+                               finish_reason, statistics_eligible, qualification_reason)
+         SELECT id, task_id, task_title_snapshot, project_snapshot,
+                (SELECT id FROM tags WHERE is_fallback = 1),
+                (SELECT name FROM tags WHERE is_fallback = 1),
+                mode, status, planned_seconds, focused_seconds, started_at, ended_at,
+                'legacy',
+                CASE WHEN mode = 'focus' AND status = 'completed' AND focused_seconds >= 30
+                     THEN 1 ELSE 0 END,
+                CASE
+                    WHEN mode = 'focus' AND status = 'completed' AND focused_seconds >= 30
+                        THEN 'qualified'
+                    WHEN mode = 'focus' AND focused_seconds < 30 THEN 'too_short'
+                    WHEN status = 'abandoned' THEN 'abandoned'
+                    ELSE 'non_focus'
+                END
+         FROM sessions_v2_old",
+        [],
+    )?;
+
+    // 5) Verify the copy preserved every row before dropping the originals.
+    let old_tasks: i64 = tx.query_row("SELECT COUNT(*) FROM tasks_v2_old", [], |r| r.get(0))?;
+    let new_tasks: i64 = tx.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+    let old_sessions: i64 =
+        tx.query_row("SELECT COUNT(*) FROM sessions_v2_old", [], |r| r.get(0))?;
+    let new_sessions: i64 = tx.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
+    if old_tasks != new_tasks || old_sessions != new_sessions {
+        return Err(CommandError::database(format!(
+            "v3 migration row count mismatch: tasks {old_tasks}->{new_tasks}, sessions {old_sessions}->{new_sessions}"
+        )));
+    }
+
+    // 6) Drop old shapes (child first), then recreate indexes on final names.
+    tx.execute_batch("DROP TABLE sessions_v2_old; DROP TABLE tasks_v2_old;")?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_sort_order ON tasks(sort_order);
+         CREATE INDEX IF NOT EXISTS idx_tasks_tag_sort ON tasks(tag_id, sort_order);
+         CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
+         CREATE INDEX IF NOT EXISTS idx_sessions_task_id ON sessions(task_id);
+         CREATE INDEX IF NOT EXISTS idx_sessions_tag_started ON sessions(tag_id, started_at);
+         CREATE INDEX IF NOT EXISTS idx_sessions_qualification
+             ON sessions(mode, statistics_eligible, started_at);",
+    )?;
+
+    // 7) timer_state gains the frozen tag snapshot columns (nullable ALTER).
+    tx.execute_batch(
+        "ALTER TABLE timer_state ADD COLUMN tag_id TEXT REFERENCES tags(id) ON DELETE SET NULL;
+         ALTER TABLE timer_state ADD COLUMN tag_name_snapshot TEXT;",
+    )?;
+
+    // 8) No dangling references may survive the upgrade.
+    let violations: usize = tx
+        .prepare("PRAGMA foreign_key_check")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .count();
+    if violations > 0 {
+        return Err(CommandError::database(format!(
+            "foreign_key_check reported {violations} violating rows after the v3 migration"
+        )));
+    }
+    Ok(())
+}
 
 /// Opens a migrated, seeded in-memory database. Used by tests.
 pub fn open_in_memory() -> Result<Connection, CommandError> {
@@ -268,6 +443,13 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), CommandError> {
         tx.commit()?;
     }
 
+    if current < 3 {
+        let tx = conn.transaction()?;
+        run_v3_migration(&tx)?;
+        tx.pragma_update(None, "user_version", 3u32)?;
+        tx.commit()?;
+    }
+
     Ok(())
 }
 
@@ -354,6 +536,7 @@ mod tests {
         assert!(tables.contains(&"timer_state".to_owned()), "missing timer_state: {tables:?}");
         assert!(tables.contains(&"sessions".to_owned()), "missing sessions: {tables:?}");
         assert!(tables.contains(&"settings".to_owned()), "missing settings: {tables:?}");
+        assert!(tables.contains(&"tags".to_owned()), "missing tags: {tables:?}");
         assert_eq!(schema_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
     }
 
@@ -365,7 +548,7 @@ mod tests {
         run_migrations(&mut conn).expect("re-running migrations should be a no-op");
 
         assert_eq!(schema_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
-        assert_eq!(table_names(&conn).len(), 4);
+        assert_eq!(table_names(&conn).len(), 5);
     }
 
     #[test]
@@ -483,17 +666,19 @@ mod tests {
         let conn = open_in_memory().expect("database should open");
 
         conn.execute(
-            "INSERT INTO tasks (id, title, done, pomodoro_target, priority, project,
+            "INSERT INTO tasks (id, title, done, pomodoro_target, priority, project, tag_id,
                                 sort_order, created_at, updated_at, completed_at)
-             VALUES ('task-1', 'Deep work', 0, 4, 'high', 'Abyssal', 0, 1, 1, NULL)",
+             VALUES ('task-1', 'Deep work', 0, 4, 'high', 'Abyssal', 'system-other', 0, 1, 1, NULL)",
             [],
         )
         .expect("task should insert");
         conn.execute(
-            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
-                                   status, planned_seconds, focused_seconds, started_at, ended_at)
-             VALUES ('session-1', 'task-1', 'Deep work', 'Abyssal', 'focus', 'completed',
-                     1500, 1500, 1, 1501)",
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                                   tag_name_snapshot, mode, status, planned_seconds,
+                                   focused_seconds, started_at, ended_at, finish_reason,
+                                   statistics_eligible, qualification_reason)
+             VALUES ('session-1', 'task-1', 'Deep work', 'Abyssal', 'system-other', '其他',
+                     'focus', 'completed', 1500, 1500, 1, 1501, 'legacy', 1, 'qualified')",
             [],
         )
         .expect("session should insert");
@@ -728,5 +913,226 @@ mod tests {
         assert_eq!(version, 1, "backup must preserve pre-migration version");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── A1–A3: SQLite v3 migration (v1.1 local prerequisites) ────────────────
+
+    /// Builds a genuine v2 on-disk database with representative user data.
+    fn build_v2_database(db_path: &Path) {
+        let mut conn = Connection::open(db_path).expect("open");
+        conn.execute_batch(MIGRATION_V1).expect("apply v1");
+        conn.execute_batch(MIGRATION_V2).expect("apply v2");
+        conn.pragma_update(None, "user_version", 2u32).expect("v2 marker");
+        crate::db::seed_defaults(&conn).expect("seed settings/timer");
+        conn.execute(
+            "INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', 'Kept', 1, 1)",
+            [],
+        )
+        .expect("task");
+        // focus completed 600s → eligible / qualified
+        conn.execute(
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
+                                   status, planned_seconds, focused_seconds, started_at, ended_at)
+             VALUES ('s-eligible', NULL, 'task', 'P', 'focus', 'completed', 1500, 600, 1, 2)",
+            [],
+        )
+        .expect("session eligible");
+        // focus completed 10s → too_short (hidden everywhere)
+        conn.execute(
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
+                                   status, planned_seconds, focused_seconds, started_at, ended_at)
+             VALUES ('s-short', NULL, 'task', 'P', 'focus', 'completed', 1500, 10, 3, 4)",
+            [],
+        )
+        .expect("session short");
+        // focus abandoned 600s → abandoned (never counted)
+        conn.execute(
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
+                                   status, planned_seconds, focused_seconds, started_at, ended_at)
+             VALUES ('s-abandoned', NULL, 'task', 'P', 'focus', 'abandoned', 1500, 600, 5, 6)",
+            [],
+        )
+        .expect("session abandoned");
+        // short break completed → non_focus
+        conn.execute(
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
+                                   status, planned_seconds, focused_seconds, started_at, ended_at)
+             VALUES ('s-break', NULL, '短休', '休息', 'short', 'completed', 300, 300, 7, 8)",
+            [],
+        )
+        .expect("session break");
+    }
+
+    #[test]
+    fn migrates_v2_to_v3_with_default_tags_and_backfill() {
+        let dir = std::env::temp_dir().join(format!(
+            "abyssal-v3-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let db_path = dir.join("abyssal-reverie.sqlite");
+        build_v2_database(&db_path);
+
+        let conn = open_at(&db_path).expect("v3 upgrade should succeed");
+        assert_eq!(schema_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+
+        // Four system tags seeded once, with exactly one fallback ("其他").
+        let tags: Vec<(String, String, i64)> = conn
+            .prepare("SELECT id, name, is_fallback FROM tags ORDER BY sort_order")
+            .expect("prepare")
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows");
+        assert_eq!(
+            tags,
+            vec![
+                ("system-study".to_owned(), "学习".to_owned(), 0),
+                ("system-work".to_owned(), "工作".to_owned(), 0),
+                ("system-life".to_owned(), "生活".to_owned(), 0),
+                ("system-other".to_owned(), "其他".to_owned(), 1),
+            ]
+        );
+
+        // Existing task backfilled to the fallback tag (never guessed).
+        let task_tag: String = conn
+            .query_row("SELECT tag_id FROM tasks WHERE id = 't1'", [], |r| r.get(0))
+            .expect("task tag");
+        assert_eq!(task_tag, "system-other");
+
+        // Session backfill per the v1.1 qualification rules.
+        let row = |id: &str| -> (String, i64, String, String) {
+            conn.query_row(
+                "SELECT finish_reason, statistics_eligible, qualification_reason, tag_name_snapshot
+                 FROM sessions WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("session row")
+        };
+        assert_eq!(row("s-eligible"), ("legacy".into(), 1, "qualified".into(), "其他".into()));
+        assert_eq!(row("s-short"), ("legacy".into(), 0, "too_short".into(), "其他".into()));
+        assert_eq!(row("s-abandoned"), ("legacy".into(), 0, "abandoned".into(), "其他".into()));
+        assert_eq!(row("s-break"), ("legacy".into(), 0, "non_focus".into(), "其他".into()));
+
+        // timer_state gained the snapshot columns (empty while idle).
+        let timer_tag: Option<String> = conn
+            .query_row("SELECT tag_id FROM timer_state WHERE id = 1", [], |r| r.get(0))
+            .expect("timer tag column exists");
+        assert_eq!(timer_tag, None);
+
+        // All pre-migration data survived.
+        assert_eq!(count(&conn, "tasks"), 1);
+        assert_eq!(count(&conn, "sessions"), 4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v3_migration_is_idempotent_on_reopen() {
+        let dir = std::env::temp_dir().join(format!(
+            "abyssal-v3re-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let db_path = dir.join("abyssal-reverie.sqlite");
+        build_v2_database(&db_path);
+
+        let first = open_at(&db_path).expect("first open");
+        let tags_first: i64 = count(&first, "tags");
+        let sessions_first: i64 = count(&first, "sessions");
+        drop(first);
+
+        let second = open_at(&db_path).expect("reopen must be a no-op");
+        assert_eq!(schema_version(&second).unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(count(&second, "tags"), tags_first, "tags must not duplicate");
+        assert_eq!(count(&second, "sessions"), sessions_first, "sessions must not duplicate");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sessions_v3_rejects_invalid_qualification_fields() {
+        let conn = open_in_memory().expect("db");
+        let base = "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot,
+                    tag_id, tag_name_snapshot, mode, status, planned_seconds, focused_seconds,
+                    started_at, ended_at, finish_reason, statistics_eligible, qualification_reason)
+                    VALUES ('x', NULL, 't', 'P', 'system-other', '其他', 'focus', 'completed',
+                    1500, 600, 1, 2, ?1, ?2, ?3)";
+
+        assert!(
+            conn.execute(base, params!["elapsed", 2i64, "qualified"]).is_err(),
+            "statistics_eligible must stay 0/1"
+        );
+        assert!(
+            conn.execute(base, params!["bogus", 1i64, "qualified"]).is_err(),
+            "finish_reason must be from the allowed set"
+        );
+        assert!(
+            conn.execute(base, params!["elapsed", 1i64, "bogus"]).is_err(),
+            "qualification_reason must be from the allowed set"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot,
+                    tag_id, tag_name_snapshot, mode, status, planned_seconds, focused_seconds,
+                    started_at, ended_at, finish_reason, statistics_eligible, qualification_reason)
+                 VALUES ('y', NULL, 't', 'P', 'system-other', '其他', 'focus', 'completed',
+                    1500, -1, 1, 2, 'elapsed', 1, 'qualified')",
+                [],
+            )
+            .is_err(),
+            "focused_seconds must stay >= 0"
+        );
+    }
+
+    // ─── A4: real-database upgrade drill (review #2 control) ──────────────────
+
+    #[test]
+    #[ignore = "A4 drill: upgrades a COPY of the real v1.0.0 database; run with cargo test drill_real -- --ignored --nocapture"]
+    fn drill_real_v2_database_upgrade_to_v3() {
+        let appdata = std::env::var("APPDATA").expect("APPDATA must be set");
+        let source = std::path::PathBuf::from(appdata)
+            .join("com.abyssalreverie.focus")
+            .join("abyssal-reverie.sqlite");
+        assert!(source.exists(), "real database not found at {}", source.display());
+
+        let dir = std::env::temp_dir().join(format!(
+            "abyssal-drill-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+
+        // Copy the whole WAL set so the copy is a faithful snapshot.
+        for ext in ["", "-wal", "-shm"] {
+            let from = std::path::PathBuf::from(format!("{}{ext}", source.display()));
+            if from.exists() {
+                std::fs::copy(&from, dir.join(format!("abyssal-reverie.sqlite{ext}")))
+                    .expect("copy must succeed");
+            }
+        }
+
+        let copy_path = dir.join("abyssal-reverie.sqlite");
+        let conn = open_at(&copy_path).expect("real database upgrade must succeed");
+        assert_eq!(schema_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+
+        eprintln!(
+            "[drill] upgraded OK — tags={} tasks={} sessions={}",
+            count(&conn, "tags"),
+            count(&conn, "tasks"),
+            count(&conn, "sessions")
+        );
+        eprintln!("[drill] upgraded copy preserved at {} for inspection", dir.display());
     }
 }
