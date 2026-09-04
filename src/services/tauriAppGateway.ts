@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 import type { AppGateway } from './appGateway'
 import type {
@@ -19,6 +20,7 @@ import type {
   TimerSnapshot,
   UpdateTaskInput,
 } from '../domain/models'
+import type { TrayAction, TrayIndicator, TimerExpiredPayload } from '../domain/tray'
 
 export class TauriAppGateway implements AppGateway {
   bootstrap() { return invoke<BootstrapPayload>('bootstrap_app') }
@@ -34,4 +36,27 @@ export class TauriAppGateway implements AppGateway {
   saveSettings(input: AppSettings) { return invoke<SaveSettingsResult>('save_settings', { input }) }
   listSessions(query: SessionQuery) { return invoke<TimerSession[]>('list_sessions', { query }) }
   getStatistics(query: StatisticsQuery) { return invoke<Statistics>('get_statistics', { query }) }
+
+  setTrayIndicator(input: TrayIndicator) { return invoke<void>('set_tray_indicator', { input }) }
+
+  // `listen` is async (returns a promise for the unlisten handle); the React
+  // effect that registers these expects a synchronous teardown, so we hand it
+  // a closure that resolves the handle lazily and unlistens on cleanup.
+  subscribeTimerExpired(cb: (payload: TimerExpiredPayload) => void): () => void {
+    let unlisten: UnlistenFn | undefined
+    let stopped = false
+    void listen<TimerExpiredPayload>('timer-expired', e => cb(e.payload))
+      .then(fn => { unlisten = stopped ? void fn() : fn })
+      .catch(() => undefined)
+    return () => { stopped = true; unlisten?.() }
+  }
+
+  subscribeTrayAction(cb: (action: TrayAction) => void): () => void {
+    let unlisten: UnlistenFn | undefined
+    let stopped = false
+    void listen<TrayAction>('tray-action', e => cb(e.payload))
+      .then(fn => { unlisten = stopped ? void fn() : fn })
+      .catch(() => undefined)
+    return () => { stopped = true; unlisten?.() }
+  }
 }

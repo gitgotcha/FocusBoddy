@@ -16,6 +16,7 @@ import type {
   TimerSnapshot,
   UpdateTaskInput,
 } from '../domain/models'
+import type { TrayAction, TrayIndicator, TimerExpiredPayload } from '../domain/tray'
 
 export interface AppGateway {
   bootstrap(): Promise<BootstrapPayload>
@@ -31,4 +32,10 @@ export interface AppGateway {
   saveSettings(input: AppSettings): Promise<SaveSettingsResult>
   listSessions(query: SessionQuery): Promise<TimerSession[]>
   getStatistics(query: StatisticsQuery): Promise<Statistics>
+  /** Paints the live tooltip + menu labels into the system tray. */
+  setTrayIndicator(input: TrayIndicator): Promise<void>
+  /** Subscribes to the Rust completion backstop. Returns an unsubscribe. */
+  subscribeTimerExpired(cb: (payload: TimerExpiredPayload) => void): () => void
+  /** Subscribes to tray menu actions (pause/resume, reset). Returns an unsubscribe. */
+  subscribeTrayAction(cb: (action: TrayAction) => void): () => void
 }

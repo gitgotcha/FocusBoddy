@@ -20,6 +20,7 @@ import type {
   TimerSnapshot,
   UpdateTaskInput,
 } from '../domain/models'
+import type { TrayAction, TrayIndicator, TimerExpiredPayload } from '../domain/tray'
 
 export interface InjectedError {
   code: string
@@ -330,6 +331,25 @@ export class FakeAppGateway implements AppGateway {
   async getStatistics(query: StatisticsQuery): Promise<Statistics> {
     this.takeFailure()
     return this.computeStatistics(query)
+  }
+
+  // --- Tray surface (no-op in tests, but recorded for assertions) ---
+
+  /** Last indicator pushed by the App, useful for component-test assertions. */
+  lastTrayIndicator: TrayIndicator | null = null
+
+  async setTrayIndicator(input: TrayIndicator): Promise<void> {
+    this.takeFailure()
+    this.lastTrayIndicator = input
+  }
+
+  subscribeTimerExpired(_cb: (payload: TimerExpiredPayload) => void): () => void {
+    // No background ticker in the fake; tests drive completion directly.
+    return () => undefined
+  }
+
+  subscribeTrayAction(_cb: (action: TrayAction) => void): () => void {
+    return () => undefined
   }
 
   private expectedRevision(input: TimerRevisionInput): number {

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import type { AppSettings, Statistics, Task, TaskPriority, TimerMode, TimerSession, TimerSnapshot } from "./domain/models";
 import { DEFAULT_SETTINGS, durationSecondsForMode } from "./domain/defaults";
 import { weekBoundaries, weekRange } from "./domain/statistics";
+import { formatTrayIndicator } from "./domain/tray";
 import { useAppGateway } from "./services/gatewayContext";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1419,6 +1420,43 @@ export default function App() {
       .then(() => { resyncLogs(); refreshStats(); })
       .catch(resync);
   }, [gateway, applyTimer, resync, resyncLogs, refreshStats]);
+
+  // ─── System tray ──────────────────────────────────────────────────────────
+  // The App root owns the tray surface because it has the authoritative timer
+  // ref + settings. Remaining is derived drift-free from `targetEndAt`, so the
+  // tray stays correct across throttling and system sleep without a local
+  // accumulator. Push immediately on any timer change, then every second while
+  // running.
+  useEffect(() => {
+    const push = () => {
+      const t = timerRef.current;
+      gateway.setTrayIndicator(formatTrayIndicator(t, Date.now())).catch(() => undefined);
+    };
+    push();
+    if (timer?.state !== "running") return;
+    const id = setInterval(push, 1000);
+    return () => clearInterval(id);
+  }, [timer, gateway]);
+
+  // Rust completion backstop → reuse the same idempotent `handleExpire` path.
+  useEffect(() => {
+    return gateway.subscribeTimerExpired(() => handleExpire());
+  }, [gateway, handleExpire]);
+
+  // Tray menu actions route through the existing handlers so the optimistic-
+  // concurrency revision flow stays single-sourced.
+  useEffect(() => {
+    return gateway.subscribeTrayAction(action => {
+      const t = timerRef.current;
+      if (!t) return;
+      if (action === "toggle") {
+        if (t.state === "running") handlePause();
+        else if (t.state === "paused") handleResume();
+      } else if (action === "reset") {
+        handleReset();
+      }
+    });
+  }, [gateway, handlePause, handleResume, handleReset]);
 
   // Load persisted state once, then recover an expired running timer
   // (recovery=true → no auto-break per spec 4.2).
