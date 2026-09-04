@@ -423,12 +423,15 @@ fn live_remaining(timer: &TimerSnapshot, now: i64) -> i64 {
     }
 }
 
-/// Writes an abandoned session for a timer that was started but not completed.
-/// Uses the timer's `active_session_id` so the session is traceable to its start.
-fn write_abandoned_session(
+/// Writes a finished (completed or abandoned) session for a timer that was
+/// started. Uses the timer's `active_session_id` so the session is traceable
+/// to its start.
+fn write_finished_session(
     conn: &Connection,
     timer: &TimerSnapshot,
     now: i64,
+    status: SessionStatus,
+    focused_seconds: i64,
 ) -> Result<(), CommandError> {
     let session_id = timer
         .active_session_id
@@ -440,9 +443,9 @@ fn write_abandoned_session(
         task_title_snapshot: timer.task_title_snapshot.clone().unwrap_or_default(),
         project_snapshot: timer.project_snapshot.clone().unwrap_or_default(),
         mode: timer.mode,
-        status: SessionStatus::Abandoned,
+        status,
         planned_seconds: timer.duration_seconds,
-        focused_seconds: timer.duration_seconds - timer.remaining_seconds,
+        focused_seconds: focused_seconds.max(0),
         started_at: timer.started_at.unwrap_or(now),
         ended_at: now,
     };
@@ -464,6 +467,16 @@ fn write_abandoned_session(
         ],
     )?;
     Ok(())
+}
+
+/// Writes an abandoned (uncounted) session for a timer the user stopped.
+fn write_abandoned_session(
+    conn: &Connection,
+    timer: &TimerSnapshot,
+    now: i64,
+) -> Result<(), CommandError> {
+    let focused = timer.duration_seconds - timer.remaining_seconds;
+    write_finished_session(conn, timer, now, SessionStatus::Abandoned, focused)
 }
 
 /// Checks that the timer's revision matches `expected_revision`, else CONFLICT.
@@ -625,8 +638,10 @@ pub fn reset_timer(
     Ok(timer)
 }
 
-/// `switch_timer_mode`: any → idle (new mode). If a session was started,
-/// writes an abandoned session first. Bumps revision.
+/// `switch_timer_mode`: any → idle (new mode). If a session was started, the
+/// elapsed time is SUBMITTED as a completed session (user request 2026-09-04:
+/// switching to a break must inherit the accumulated time instead of
+/// discarding it as abandoned). Bumps revision.
 pub fn switch_timer_mode(
     conn: &mut Connection,
     settings: &AppSettings,
@@ -642,11 +657,11 @@ pub fn switch_timer_mode(
         && timer.started_at.is_some();
 
     if started {
-        timer.remaining_seconds = match timer.state {
-            TimerState::Running => live_remaining(&timer, now),
-            _ => timer.remaining_seconds,
+        let focused = match timer.state {
+            TimerState::Running => timer.duration_seconds - live_remaining(&timer, now),
+            _ => timer.duration_seconds - timer.remaining_seconds,
         };
-        write_abandoned_session(&tx, &timer, now)?;
+        write_finished_session(&tx, &timer, now, SessionStatus::Completed, focused)?;
     }
 
     let duration = settings.duration_seconds_for_mode(input.mode);
@@ -1660,11 +1675,15 @@ mod tests {
     }
 
     #[test]
-    fn switch_mode_writes_abandoned_and_changes_mode() {
+    fn switch_mode_submits_elapsed_time_and_changes_mode() {
         let mut conn = db::open_in_memory().expect("db");
-        start_timer(&mut conn, &settings(), &StartTimerInput {
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
             expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
         }).expect("start");
+
+        // Simulate 10 minutes focused (15 remaining).
+        timer.target_end_at = Some(now_millis() + 900 * 1000);
+        write_timer(&conn, &timer).expect("write");
 
         let switched = switch_timer_mode(&mut conn, &settings(), &SwitchTimerModeInput {
             expected_revision: 1, mode: TimerMode::Short,
@@ -1675,9 +1694,40 @@ mod tests {
         assert_eq!(switched.duration_seconds, 300);
         assert_eq!(switched.revision, 2);
 
+        // The elapsed focus time is submitted, not discarded.
         let sessions = list_sessions(&conn, 10).expect("sessions");
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].status, SessionStatus::Abandoned);
+        assert_eq!(sessions[0].status, SessionStatus::Completed);
+        assert_eq!(sessions[0].mode, TimerMode::Focus);
+        assert!(sessions[0].focused_seconds >= 595 && sessions[0].focused_seconds <= 600,
+            "expected ~600s focused, got {}", sessions[0].focused_seconds);
+
+        // And it counts toward statistics (completed focus).
+        let stats = all_time_statistics(&conn).expect("stats");
+        assert_eq!(stats.focus_session_count, 1);
+    }
+
+    #[test]
+    fn switch_mode_from_paused_submits_remaining_based_elapsed() {
+        let mut conn = db::open_in_memory().expect("db");
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+
+        timer.remaining_seconds = 1200; // 300s focused before pausing
+        timer.state = TimerState::Paused;
+        timer.target_end_at = None;
+        timer.revision = 1;
+        write_timer(&conn, &timer).expect("write");
+
+        switch_timer_mode(&mut conn, &settings(), &SwitchTimerModeInput {
+            expected_revision: 1, mode: TimerMode::Long,
+        }).expect("switch");
+
+        let sessions = list_sessions(&conn, 10).expect("sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, SessionStatus::Completed);
+        assert_eq!(sessions[0].focused_seconds, 300);
         assert_eq!(sessions[0].mode, TimerMode::Focus);
     }
 

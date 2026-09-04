@@ -1388,6 +1388,14 @@ export default function App() {
     if (action === "reset")   applyTimer(await gateway.resetTimer({ expectedRevision: cur.revision }));
   }, [gateway, applyTimer]);
 
+  // Refresh the activity list from persisted sessions (used after reset and
+  // mode switches, both of which write sessions server-side).
+  const resyncLogs = useCallback(() => {
+    gateway.listSessions({ limit: 50 })
+      .then(sessions => { setLogs(sessions.map(sessionToLog)); })
+      .catch(() => undefined);
+  }, [gateway]);
+
   const handlePause = useCallback(() => { runRevisionAction("pause").catch(resync); }, [runRevisionAction, resync]);
   const handleResume = useCallback(() => { runRevisionAction("resume").catch(resync); }, [runRevisionAction, resync]);
 
@@ -1395,11 +1403,9 @@ export default function App() {
   // statistics: the abandoned attempt is stored but never counted (spec §6).
   const handleReset = useCallback(() => {
     runRevisionAction("reset")
-      .then(() => gateway.listSessions({ limit: 50 }))
-      .then(sessions => { setLogs(sessions.map(sessionToLog)); })
+      .then(() => { resyncLogs(); refreshStats(); })
       .catch(resync);
-    refreshStats();
-  }, [runRevisionAction, gateway, resync, refreshStats]);
+  }, [runRevisionAction, resyncLogs, refreshStats, resync]);
 
   // Goal ring / today minutes: completed focus sessions only.
   const countedFocusLogs = logs.filter(isCountedFocus);
@@ -1410,8 +1416,9 @@ export default function App() {
     if (!cur) return;
     gateway.switchTimerMode({ mode, expectedRevision: cur.revision })
       .then(applyTimer)
+      .then(() => { resyncLogs(); refreshStats(); })
       .catch(resync);
-  }, [gateway, applyTimer, resync]);
+  }, [gateway, applyTimer, resync, resyncLogs, refreshStats]);
 
   // Load persisted state once, then recover an expired running timer
   // (recovery=true → no auto-break per spec 4.2).

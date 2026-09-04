@@ -190,6 +190,36 @@ export class FakeAppGateway implements AppGateway {
   async switchTimerMode(input: SwitchTimerModeInput): Promise<TimerSnapshot> {
     this.takeFailure()
     const now = Date.now()
+
+    // Mirrors the Rust machine: switching submits a started session
+    // (completed with actual elapsed time) instead of abandoning it.
+    const started =
+      this.timer.state !== 'idle' && this.timer.activeSessionId && this.timer.startedAt
+    if (started) {
+      const focusedSeconds = Math.max(
+        0,
+        this.timer.durationSeconds -
+          (this.timer.state === 'running' && this.timer.targetEndAt
+            ? Math.max(0, Math.ceil((this.timer.targetEndAt - now) / 1000))
+            : this.timer.remainingSeconds),
+      )
+      this.sessions = [
+        ...this.sessions,
+        {
+          id: this.timer.activeSessionId!,
+          taskId: this.timer.selectedTaskId,
+          taskTitleSnapshot: this.timer.taskTitleSnapshot ?? '未指定任务',
+          projectSnapshot: this.timer.projectSnapshot ?? '通用',
+          mode: this.timer.mode,
+          status: 'completed',
+          plannedSeconds: this.timer.durationSeconds,
+          focusedSeconds,
+          startedAt: this.timer.startedAt ?? now,
+          endedAt: now,
+        },
+      ]
+    }
+
     this.timer = {
       ...idleTimerForMode(input.mode, this.settings),
       revision: this.expectedRevision(input),

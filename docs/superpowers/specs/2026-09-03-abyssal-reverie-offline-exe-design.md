@@ -138,8 +138,8 @@ export interface AppGateway {
 - `start_timer`：Rust 在一个 transaction 中校验状态、读取任务、复制快照、生成 UUID v4、计算 `target_end_at`、写 running state、revision 加一。
 - `pause_timer`：只允许 running → paused；按 `target_end_at` 计算 remaining，清除 target end，revision 加一。
 - `resume_timer`：只允许 paused → running；按 remaining 生成新的 `target_end_at`，revision 加一。
-- `reset_timer`：在单一 transaction 中，如 session 已开始则写一条 abandoned session，然后回到当前 mode 的 idle。
-- `switch_timer_mode`：在单一 transaction 中，如 session 已开始则写一条 abandoned session，切换 mode 并回到 idle。
+- `reset_timer`：在单一 transaction 中，如 session 已开始则写一条 abandoned session，然后回到当前 mode 的 idle。abandoned 不计入任何统计（用户主动"结束本次"= 丢弃，不自动统计）。
+- `switch_timer_mode`：在单一 transaction 中，如 session 已开始则按实际专注时长写一条 **completed** session（2026-09-04 需求变更：切换到短休/长休时继承已积累时间直至提交，不再按 abandoned 丢弃），切换 mode 并回到 idle。
 - 未真正开始的 idle timer 不生成 abandoned session。
 - 所有动作带 `expectedRevision`；事务内条件更新影响行数为零时返回 `CONFLICT`。
 
