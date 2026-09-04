@@ -24,6 +24,8 @@ export interface AppSettings {
   soundEnabled: boolean
   notificationEnabled: boolean
   dailyGoal: number
+  /** R1-03: pauses the ocean background video to cut CPU/GPU/battery cost. */
+  reduceMotion: boolean
   updatedAt: number
 }
 

@@ -233,7 +233,7 @@ pub fn delete_task(conn: &Connection, id: &str) -> Result<(), CommandError> {
 pub fn get_settings(conn: &Connection) -> Result<AppSettings, CommandError> {
     conn.query_row(
         "SELECT focus_duration_minutes, short_break_minutes, long_break_minutes, auto_start_break,
-                sound_enabled, notification_enabled, daily_goal, updated_at
+                sound_enabled, notification_enabled, daily_goal, reduce_motion, updated_at
          FROM settings WHERE id = 1",
         [],
         |row| {
@@ -245,7 +245,8 @@ pub fn get_settings(conn: &Connection) -> Result<AppSettings, CommandError> {
                 sound_enabled: row.get::<_, i64>(4)? != 0,
                 notification_enabled: row.get::<_, i64>(5)? != 0,
                 daily_goal: row.get(6)?,
-                updated_at: row.get(7)?,
+                reduce_motion: row.get::<_, i64>(7)? != 0,
+                updated_at: row.get(8)?,
             })
         },
     )
@@ -307,7 +308,7 @@ pub fn save_settings(
         "UPDATE settings SET focus_duration_minutes = ?1, short_break_minutes = ?2,
                               long_break_minutes = ?3, auto_start_break = ?4,
                               sound_enabled = ?5, notification_enabled = ?6,
-                              daily_goal = ?7, updated_at = ?8
+                              daily_goal = ?7, reduce_motion = ?8, updated_at = ?9
          WHERE id = 1",
         params![
             settings.focus_duration_minutes,
@@ -317,6 +318,7 @@ pub fn save_settings(
             settings.sound_enabled as i64,
             settings.notification_enabled as i64,
             settings.daily_goal,
+            settings.reduce_motion as i64,
             now,
         ],
     )?;
@@ -1162,7 +1164,7 @@ pub fn import_data(conn: &mut Connection, bundle: &ExportBundle) -> Result<Impor
         "UPDATE settings SET focus_duration_minutes = ?1, short_break_minutes = ?2,
                           long_break_minutes = ?3, auto_start_break = ?4,
                           sound_enabled = ?5, notification_enabled = ?6,
-                          daily_goal = ?7, updated_at = ?8
+                          daily_goal = ?7, reduce_motion = ?8, updated_at = ?9
          WHERE id = 1",
         params![
             bundle.settings.focus_duration_minutes,
@@ -1172,6 +1174,7 @@ pub fn import_data(conn: &mut Connection, bundle: &ExportBundle) -> Result<Impor
             bundle.settings.sound_enabled as i64,
             bundle.settings.notification_enabled as i64,
             bundle.settings.daily_goal,
+            bundle.settings.reduce_motion as i64,
             now,
         ],
     )?;

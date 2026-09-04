@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   soundEnabled: true,
   notificationEnabled: true,
   dailyGoal: 8,
+  reduceMotion: false,
   updatedAt: 0,
 }
 

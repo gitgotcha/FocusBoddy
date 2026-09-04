@@ -138,6 +138,11 @@ pub struct AppSettings {
     pub sound_enabled: bool,
     pub notification_enabled: bool,
     pub daily_goal: i64,
+    /// R1-03 (Item 4 Round 4): in-app "reduce motion" switch — pauses the ocean
+    /// background video to cut CPU/GPU/battery cost. `serde(default)` keeps v1
+    /// backups (which lack the field) importable.
+    #[serde(default)]
+    pub reduce_motion: bool,
     pub updated_at: i64,
 }
 
@@ -152,6 +157,7 @@ impl Default for AppSettings {
             sound_enabled: true,
             notification_enabled: true,
             daily_goal: 8,
+            reduce_motion: false,
             updated_at: 0,
         }
     }

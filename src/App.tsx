@@ -59,8 +59,11 @@ const SIDEBAR_GLASS: React.CSSProperties = {
 const MODE_LABELS: Record<TimerMode, string> = { focus: "专注", short: "短休", long: "长休" };
 
 // ─── Ocean Video Background ───────────────────────────────────────────────────
-function OceanVideo() {
+function OceanVideo({ reduceMotion }: { reduceMotion: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  // R1-04: if the video (or its source) fails to load, fall back to a poster
+  // <div> so the ocean scene never degrades to a black screen.
+  const [videoFailed, setVideoFailed] = useState(false);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -71,25 +74,53 @@ function OceanVideo() {
     applyRate();
     v.addEventListener("loadedmetadata", applyRate);
 
-    const onVisibility = () => {
-      if (document.hidden) v.pause();
-      else v.play().catch(() => {});
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+    // `play()` is unimplemented in some environments (jsdom returns undefined,
+    // older WebViews may throw) — never let a background-play attempt crash.
+    const play = () => {
+      try { void v.play()?.catch(() => {}); } catch { /* playback unavailable */ }
     };
+
+    // Play only when motion is wanted (in-app toggle off, OS reduce-motion off)
+    // and the window is actually visible. Pausing on `document.hidden` also
+    // covers minimize/occlusion, cutting CPU/GPU cost in the tray.
+    const sync = () => {
+      if (!reduceMotion && !mq.matches && !document.hidden) play();
+      else v.pause();
+    };
+
+    const onVisibility = () => sync();
     document.addEventListener("visibilitychange", onVisibility);
 
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    if (mq.matches) v.pause();
-    const onMq = (e: MediaQueryListEvent) => {
-      if (e.matches) v.pause(); else v.play().catch(() => {});
-    };
+    const onMq = () => sync();
     mq.addEventListener("change", onMq);
+
+    sync();
 
     return () => {
       v.removeEventListener("loadedmetadata", applyRate);
       document.removeEventListener("visibilitychange", onVisibility);
       mq.removeEventListener("change", onMq);
     };
-  }, []);
+  }, [reduceMotion]);
+
+  if (videoFailed) {
+    return (
+      <>
+        <div
+          aria-hidden
+          style={{
+            position: "fixed", inset: 0, zIndex: 0, display: "block",
+            backgroundImage: "url(/media/ocean-poster.jpg)",
+            backgroundSize: "cover", backgroundPosition: "center",
+            filter: "brightness(0.52) saturate(0.44) contrast(0.94)",
+          }}
+        />
+        <Vignettes />
+      </>
+    );
+  }
 
   return (
     <>
@@ -98,6 +129,7 @@ function OceanVideo() {
         ref={videoRef}
         autoPlay muted loop playsInline
         poster="/media/ocean-poster.jpg"
+        onError={() => setVideoFailed(true)}
         style={{
           position: "fixed", inset: 0,
           width: "100vw", height: "100vh",
@@ -111,7 +143,16 @@ function OceanVideo() {
         <source src="/media/ocean-loop.mp4" type="video/mp4" />
       </video>
 
-      {/* Single continuous vignette — no section-specific bands */}
+      <Vignettes />
+    </>
+  );
+}
+
+// Single continuous vignette + radial corners — shared by the video and its
+// poster fallback so the look never changes across failure modes.
+function Vignettes() {
+  return (
+    <>
       <div style={{
         position: "fixed", inset: 0, zIndex: 1, pointerEvents: "none",
         background: `linear-gradient(
@@ -125,7 +166,6 @@ function OceanVideo() {
         )`,
       }} />
 
-      {/* Radial vignette — corners only */}
       <div style={{
         position: "fixed", inset: 0, zIndex: 1, pointerEvents: "none",
         background: "radial-gradient(ellipse 88% 86% at 50% 48%, transparent 28%, rgba(5,7,9,0.48) 100%)",
@@ -1077,7 +1117,8 @@ function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
         <Section label="行为">
           <Row label="自动开始休息" hint="专注结束后自动继续"><Toggle value={draft.autoStartBreak} onChange={v => update({ autoStartBreak: v })} /></Row>
           <Row label="声音提示"><Toggle value={draft.soundEnabled} onChange={v => update({ soundEnabled: v })} /></Row>
-          <Row label="桌面通知" last><Toggle value={draft.notificationEnabled} onChange={v => update({ notificationEnabled: v })} /></Row>
+          <Row label="桌面通知"><Toggle value={draft.notificationEnabled} onChange={v => update({ notificationEnabled: v })} /></Row>
+          <Row label="降低动态效果" hint="暂停海洋背景动画，降低 CPU 与电量消耗" last><Toggle value={draft.reduceMotion} onChange={v => update({ reduceMotion: v })} /></Row>
         </Section>
         <Section label="目标">
           <Row label="每日专注次数" last><Stepper value={draft.dailyGoal} onChange={v => update({ dailyGoal: v })} min={1} max={50} /></Row>
@@ -1719,7 +1760,7 @@ export default function App() {
       background: "#050709", overflow: "hidden",
       display: "flex",
     }}>
-      <OceanVideo />
+      <OceanVideo reduceMotion={activeSettings.reduceMotion} />
 
       {shortcutConflict && (
         <div

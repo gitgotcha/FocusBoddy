@@ -14,9 +14,9 @@
 | 编号 | 轮次 | 级别 | 问题 | 状态 | 修复提交 |
 |------|------|------|------|------|----------|
 | R1-01 | Round 1 | P0/P1 | 托盘“彻底退出”时若正在计时，未保存剩余时间，下次启动会被后台 ticker 自动完成，悄悄消耗专注时间 | ✅ 已修复 | `6042665` |
-| R1-02 | Round 1 | P1 | 全局快捷键被其它程序占用时，`build()` 返回错误导致启动崩溃（`.run().expect()` panic） | ⏳ 待 Round 3 | — |
-| R1-03 | Round 4 | P2 | 缺少“降低动态效果”开关；视频在失焦/最小化时未降开销 | ⏳ 待 Round 4 | — |
-| R1-04 | Round 4 | P1 | 视频加载失败时可能黑屏，需回退 `ocean-poster` | ⏳ 待 Round 4 | — |
+| R1-02 | Round 1 | P1 | 全局快捷键被其它程序占用时，`build()` 返回错误导致启动崩溃（`.run().expect()` panic） | ✅ 已修复 | `03917e2` |
+| R1-03 | Round 4 | P2 | 缺少“降低动态效果”开关；视频在失焦/最小化时未降开销 | ✅ 已修复 | 本轮提交 |
+| R1-04 | Round 4 | P1 | 视频加载失败时可能黑屏，需回退 `ocean-poster` | ✅ 已修复 | 本轮提交 |
 | R1-05 | Round 2 | P1 | 升级/卸载时用户数据保留说明缺失 | ✅ 已说明（见「数据保留」） | `01c3afc` |
 
 ---
@@ -89,11 +89,57 @@
 2. 删除某任务后，统计页该项目历史仍计（快照保留）。
 3. （可选）将 `appData\abyssal-reverie.sqlite` 替换为乱码文件后启动 → 应用应正常启动，且乱码文件被重命名为 `.corrupt-<时间戳>` 保留。
 
-## Round 3 — 桌面生命周期（P1）⏳ 规划中
-- 关闭→托盘；托盘退出→真实退出；双击 EXE 单实例；打包后托盘图标/菜单；开机自启默认关闭；**全局快捷键冲突优雅降级（R1-02）**；设置持久；通知关闭仍完成。
+## Round 3 — 桌面生命周期（P1）✅
+**验收 EXE**：`src-tauri/target/release/abyssal-reverie.exe`（提交 `03917e2`）
 
-## Round 4 — 离线资源与性能（P1/P2）⏳ 规划中
-- 无外部网络请求；媒体全本地；**视频失败回退 poster（R1-04）**；中文/空格安装路径；视频不误打包进 asar；~3s 启动；低空闲 CPU；失焦/最小化降视频开销；**“降低动态效果”开关（R1-03）**。
+### 本轮修复（R1-02，P1）
+**问题**：全局快捷键在插件 builder 的 `.with_shortcut()` 中于 `.build()` 时注册，被其它程序占用时返回 `Err` → `.run().expect()` panic，应用启动即崩溃（P0 级"无法启动"）。
+
+**修复**：注册从 builder 移到运行时 `setup`：
+- builder 只保留全局 `with_handler`（`.build()` 不再可能因冲突失败，也移除了 `.expect()`）。
+- `setup` 内 `app.global_shortcut().register(GLOBAL_SHORTCUT)` 用 `match` 包裹：冲突时 `eprintln!` 记录 + 向前端 emit `global-shortcut-conflict` 事件，**应用照常启动**，仅热键禁用。
+- 插件源码确认：builder 的全局 handler 对运行时注册的快捷键同样生效（同一 `shortcuts` 存储）。
+- 前端 `AppGateway.subscribeGlobalShortcutConflict`（`listen` 实现 + FakeAppGateway 桩 + 测试），`App.tsx` 顶部显示可关闭的警告横幅（关闭占用程序后重启恢复）。
+
+### 审计结论（既有机制已健壮）
+- 关闭→托盘（`prevent_close` + hide）；托盘退出→真实退出（Round 1 已冻结运行态为暂停）。
+- 双击 EXE → `single-instance` 插件聚焦已有窗口；托盘图标经 `include_image!` 编译期内嵌，必随产物分发。
+- 开机自启默认关闭（`launchAtLogin` 读自 `getAutostart`，从不自动开启）。
+- 设置跨重启持久（SQLite）；通知关闭不影响完成（完成写入与会话记录独立于通知设置）。
+
+### 附带修复
+3 个 Rust 测试的墙钟窗口过窄（focused/remaining 由 `target_end_at` 无漂移推导，但测试内 `now_millis()` 之间真实流逝 1s 即越界）——放宽至 ~10s 容差，消除偶发 flaky，不掩盖任何行为缺陷。
+
+### 测试与构建验证
+`cargo test` **62 passed**；`tsc` 干净；`vitest` **17 passed**（+1 冲突订阅测试）；真实 EXE 重建。
+
+---
+
+## Round 4 — 离线资源与性能（P1/P2）✅
+**验收 EXE**：`src-tauri/target/release/abyssal-reverie.exe`（本轮提交）
+
+### 本轮修复
+- **R1-04（P1）视频失败回退**：`OceanVideo` 增加错误态——`<video>` `onError` 后切换为以 `ocean-poster.jpg` 为背景的等价层（同一滤镜/暗角），任何加载失败都不会黑屏（父级深色底 + poster 双保险）。
+- **R1-03（P2）"降低动态效果"开关**：
+  - DB **v2 迁移**：`settings` 表新增 `reduce_motion INTEGER NOT NULL DEFAULT 0`（`ALTER TABLE`，就地升级，v1 数据全保留——含专项测试 `v1_database_migrates_to_v2_preserving_data`）。
+  - `AppSettings`（Rust/TS）+ serde `#[serde(default)]`，v1 备份导入兼容（缺字段默认 false）。
+  - 设置面板新增「降低动态效果」开关；`OceanVideo` 接收该开关：开启/系统 reduce-motion/窗口隐藏任一条件即暂停视频；恢复播放统一走带防护的 `play()`（jsdom/旧 WebView 返回 undefined 或抛错都不崩——修复了冒烟测试暴露的挂载期 `play()` 异常）。
+
+### 离线与资源审计结论
+- **无外部请求**：`offlineSources.test.ts` 扫描 src/public/index.html 的 http(s) 引用、fetch/XHR/WebSocket、Google Fonts、Pexels —— 全部通过；CSP 亦仅允许 `self/asset:/ipc:`。
+- **媒体全本地**：`ocean-loop.mp4`（7.7 MB）、`ocean-poster.jpg`（83 KB）、`focus-complete.wav`（1 MB）、两套 woff2 字体均在 `dist/` 内。
+- **不误打包**：Tauri 非 Electron，无 asar；`frontendDist` 资源编译期内嵌进 exe，视频 7.7 MB 属合理体积，随 exe 走 → **中文/空格安装路径天然无资源加载问题**（无外部资源路径依赖）。
+- **空闲开销**：`document.hidden`（含最小化/遮挡）即暂停视频；托盘后台仅 1 Hz 只读 DB 轮询。
+- 启动 ~3s、1080p 24/30fps H.264 规格：需真实 Windows 环境确认（见验收清单）。
+
+### 测试与构建验证
+`cargo test` **63 passed**（+1 v1→v2 迁移）；`tsc` 干净；`vitest` **17 passed**；真实 EXE 重建。
+
+### 需用户在真实 Windows 环境验证
+1. DevTools Network 面板确认为空（无外部请求）。
+2. 设置 → 开启「降低动态效果」→ 海洋背景静止为 poster 帧，CPU 占用下降；关闭后恢复动画。
+3. 最小化到托盘数分钟，任务管理器确认空闲 CPU 低。
+4. 启动耗时约 3s 内；重命名 exe 所在目录为中文/含空格路径后资源仍正常。
 
 ## Round 5 — UI 与交互一致性（P2）⏳ 规划中
 - 间距/比例统一；玻璃质感统一；海洋背景全屏无接缝；缩放不溢出；动态背景对比度；hover/focus/active/disabled；等宽数字不抖动；100–200% DPI；键盘可操作。

@@ -7,7 +7,7 @@ use crate::error::CommandError;
 use crate::models::{AppSettings, TimerMode, TimerSnapshot};
 
 /// Bump this whenever a new migration is appended to `MIGRATIONS`.
-const LATEST_SCHEMA_VERSION: u32 = 1;
+const LATEST_SCHEMA_VERSION: u32 = 2;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at             INTEGER NOT NULL
 );
 "#;
+
+/// v2 (Item 4 Round 4, R1-03): in-app "reduce motion" switch. Added as a
+/// column migration so existing v1 databases upgrade in place, preserving all
+/// tasks/sessions/settings.
+const MIGRATION_V2: &str =
+    "ALTER TABLE settings ADD COLUMN reduce_motion INTEGER NOT NULL DEFAULT 0;";
 
 /// Opens a migrated, seeded in-memory database. Used by tests.
 pub fn open_in_memory() -> Result<Connection, CommandError> {
@@ -190,6 +196,13 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), CommandError> {
         tx.commit()?;
     }
 
+    if current < 2 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(MIGRATION_V2)?;
+        tx.pragma_update(None, "user_version", 2u32)?;
+        tx.commit()?;
+    }
+
     Ok(())
 }
 
@@ -199,8 +212,9 @@ pub fn seed_defaults(conn: &Connection) -> Result<(), CommandError> {
     conn.execute(
         "INSERT INTO settings (
             id, focus_duration_minutes, short_break_minutes, long_break_minutes,
-            auto_start_break, sound_enabled, notification_enabled, daily_goal, updated_at
-         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            auto_start_break, sound_enabled, notification_enabled, daily_goal,
+            reduce_motion, updated_at
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO NOTHING",
         params![
             settings.focus_duration_minutes,
@@ -210,6 +224,7 @@ pub fn seed_defaults(conn: &Connection) -> Result<(), CommandError> {
             settings.sound_enabled as i64,
             settings.notification_enabled as i64,
             settings.daily_goal,
+            settings.reduce_motion as i64,
             settings.updated_at,
         ],
     )?;
@@ -489,6 +504,51 @@ mod tests {
         assert!(is_healthy(&conn));
         assert_eq!(count(&conn, "settings"), 1);
         assert_eq!(count(&conn, "timer_state"), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v1_database_migrates_to_v2_preserving_data() {
+        let dir = std::env::temp_dir().join(format!(
+            "abyssal-migrate-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let db_path = dir.join("abyssal-reverie.sqlite");
+
+        // Build a genuine v1 database by hand (no reduce_motion column), with
+        // user data that must survive the in-place upgrade.
+        {
+            let mut conn = Connection::open(&db_path).expect("open");
+            conn.execute_batch(MIGRATION_V1).expect("apply v1");
+            conn.pragma_update(None, "user_version", 1u32).expect("v1 marker");
+            conn.execute(
+                "INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', 'Kept', 1, 1)",
+                [],
+            )
+            .expect("task");
+            conn.execute(
+                "INSERT INTO settings (id, focus_duration_minutes, short_break_minutes,
+                                       long_break_minutes, auto_start_break, sound_enabled,
+                                       notification_enabled, daily_goal, updated_at)
+                 VALUES (1, 17, 5, 15, 0, 1, 1, 8, 0)",
+                [],
+            )
+            .expect("settings");
+        }
+
+        // Reopen through the normal path → migrates to v2 without data loss.
+        let conn = open_at(&db_path).expect("open_at should migrate v1 → v2");
+        assert_eq!(schema_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+
+        let settings = crate::repository::get_settings(&conn).expect("settings readable");
+        assert_eq!(settings.focus_duration_minutes, 17, "user setting preserved");
+        assert!(!settings.reduce_motion, "new column defaults to false");
+        assert_eq!(count(&conn, "tasks"), 1, "task data preserved");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
