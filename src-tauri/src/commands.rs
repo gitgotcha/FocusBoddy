@@ -1,13 +1,17 @@
+use std::fs;
 use std::sync::MutexGuard;
 
 use rusqlite::Connection;
+use tauri::AppHandle;
 use tauri::State;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::error::CommandError;
 use crate::models::{
     AppSettings, BootstrapPayload, CompleteTimerInput, CompleteTimerResult, CreateTaskInput,
-    SaveSettingsResult, SessionQuery, StartTimerInput, Statistics, StatisticsQuery,
-    SwitchTimerModeInput, Task, TimerRevisionInput, TimerSession, TimerSnapshot, UpdateTaskInput,
+    ExportBundle, ExportSummary, ImportPreview, ImportSummary, SaveSettingsResult, SessionQuery,
+    StartTimerInput, Statistics, StatisticsQuery, SwitchTimerModeInput, Task, TimerRevisionInput,
+    TimerSession, TimerSnapshot, UpdateTaskInput,
 };
 use crate::repository;
 use crate::AppState;
@@ -113,4 +117,112 @@ pub fn list_sessions(state: State<'_, AppState>, query: SessionQuery) -> Result<
 pub fn get_statistics(state: State<'_, AppState>, query: StatisticsQuery) -> Result<Statistics, CommandError> {
     let conn = lock_db(&state)?;
     repository::get_statistics(&conn, &query)
+}
+
+// ─── Data export & backup (Item 3) ─────────────────────────────────────────
+
+/// Opens a native "Save As" dialog and returns the chosen path (or `null` if
+/// the user cancelled). The dialog is shown from Rust so the file I/O stays
+/// behind the single `AppGateway` IPC boundary — no JS dialog plugin needed.
+#[tauri::command]
+pub fn pick_export_path(app: AppHandle, suggested_name: String) -> Result<Option<String>, CommandError> {
+    let chosen = app
+        .dialog()
+        .file()
+        .set_title("导出 Abyssal Reverie 备份")
+        .set_file_name(&suggested_name)
+        .add_filter("JSON 备份", &["json"])
+        .blocking_save_file();
+    match chosen {
+        Some(p) => {
+            let pb = p
+                .into_path()
+                .map_err(|e| CommandError::internal(format!("无法解析文件路径: {e}")))?;
+            Ok(Some(pb.to_string_lossy().to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Opens a native "Open" dialog restricted to JSON backups; returns the chosen
+/// path (or `null` if cancelled).
+#[tauri::command]
+pub fn pick_import_path(app: AppHandle) -> Result<Option<String>, CommandError> {
+    let chosen = app
+        .dialog()
+        .file()
+        .set_title("导入 Abyssal Reverie 备份")
+        .add_filter("JSON 备份", &["json"])
+        .blocking_pick_file();
+    match chosen {
+        Some(p) => {
+            let pb = p
+                .into_path()
+                .map_err(|e| CommandError::internal(format!("无法解析文件路径: {e}")))?;
+            Ok(Some(pb.to_string_lossy().to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Serializes the full backup bundle and writes it to `path`.
+#[tauri::command]
+pub fn export_backup_to(state: State<'_, AppState>, path: String) -> Result<ExportSummary, CommandError> {
+    let conn = lock_db(&state)?;
+    let bundle = repository::export_data(&conn)?;
+    let json = serde_json::to_string_pretty(&bundle)
+        .map_err(|e| CommandError::internal(format!("序列化备份失败: {e}")))?;
+    let bytes = json.len() as u64;
+    fs::write(&path, json).map_err(|e| CommandError::internal(format!("写入文件失败: {e}")))?;
+    Ok(ExportSummary {
+        path,
+        bytes,
+        tasks: bundle.tasks.len() as i64,
+        sessions: bundle.sessions.len() as i64,
+    })
+}
+
+/// Writes a spreadsheet-friendly CSV of all sessions to `path`.
+#[tauri::command]
+pub fn export_sessions_csv_to(state: State<'_, AppState>, path: String) -> Result<ExportSummary, CommandError> {
+    let conn = lock_db(&state)?;
+    let csv = repository::export_sessions_csv(&conn)?;
+    let bytes = csv.len() as u64;
+    fs::write(&path, csv).map_err(|e| CommandError::internal(format!("写入文件失败: {e}")))?;
+    let sessions = repository::list_sessions(&conn, i64::MAX)?.len() as i64;
+    Ok(ExportSummary {
+        path,
+        bytes,
+        tasks: 0,
+        sessions,
+    })
+}
+
+/// Reads and validates a backup file, returning row counts for the confirm
+/// step. Does NOT mutate the database.
+#[tauri::command]
+pub fn preview_import_from(path: String) -> Result<ImportPreview, CommandError> {
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| CommandError::validation(format!("无法读取文件: {e}")))?;
+    let bundle: ExportBundle = serde_json::from_str(&raw)
+        .map_err(|e| CommandError::validation(format!("备份文件格式无效: {e}")))?;
+    repository::validate_import(&bundle)?;
+    Ok(ImportPreview {
+        schema_version: bundle.schema_version,
+        tasks: bundle.tasks.len() as i64,
+        sessions: bundle.sessions.len() as i64,
+    })
+}
+
+/// Replaces tasks, sessions and settings from the chosen backup file.
+#[tauri::command]
+pub fn import_backup_from(state: State<'_, AppState>, path: String) -> Result<ImportSummary, CommandError> {
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| CommandError::validation(format!("无法读取文件: {e}")))?;
+    let bundle: ExportBundle = serde_json::from_str(&raw)
+        .map_err(|e| CommandError::validation(format!("备份文件格式无效: {e}")))?;
+    let mut conn = lock_db(&state)?;
+    let mut summary = repository::import_data(&mut conn, &bundle)?;
+    summary.path = path;
+    Ok(summary)
 }

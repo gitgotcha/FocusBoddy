@@ -140,3 +140,27 @@ export interface SaveSettingsResult {
   settings: AppSettings
   timer: TimerSnapshot
 }
+
+// ─── Data export & backup (Item 3) ─────────────────────────────────────────
+
+/** Row counts returned by `previewImport` before a destructive import. */
+export interface ImportPreview {
+  schemaVersion: number
+  tasks: number
+  sessions: number
+}
+
+/** Result of a successful export (bytes written to disk). */
+export interface ExportSummary {
+  path: string
+  bytes: number
+  tasks: number
+  sessions: number
+}
+
+/** Result of a successful import (rows replaced in the database). */
+export interface ImportSummary {
+  path: string
+  tasks: number
+  sessions: number
+}

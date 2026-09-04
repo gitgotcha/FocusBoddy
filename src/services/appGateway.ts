@@ -4,6 +4,9 @@ import type {
   CompleteTimerInput,
   CompleteTimerResult,
   CreateTaskInput,
+  ExportSummary,
+  ImportPreview,
+  ImportSummary,
   SaveSettingsResult,
   SessionQuery,
   StartTimerInput,
@@ -42,4 +45,16 @@ export interface AppGateway {
   getAutostart(): Promise<boolean>
   /** Enables/disables launch-at-login; resolves to the resulting state. */
   setAutostart(enabled: boolean): Promise<boolean>
+  /** Opens a native Save-As dialog; resolves to the chosen path or null. */
+  pickExportPath(suggestedName: string): Promise<string | null>
+  /** Opens a native Open dialog (JSON only); resolves to the chosen path or null. */
+  pickImportPath(): Promise<string | null>
+  /** Writes the full backup bundle as JSON to `path`. */
+  exportBackup(path: string): Promise<ExportSummary>
+  /** Writes all sessions as a CSV spreadsheet to `path`. */
+  exportSessionsCsv(path: string): Promise<ExportSummary>
+  /** Reads + validates a backup file without mutating the DB. */
+  previewImport(path: string): Promise<ImportPreview>
+  /** Replaces tasks/sessions/settings from the backup at `path`. */
+  importBackup(path: string): Promise<ImportSummary>
 }

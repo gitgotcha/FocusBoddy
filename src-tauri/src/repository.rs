@@ -3,9 +3,9 @@ use uuid::Uuid;
 
 use crate::error::CommandError;
 use crate::models::{
-    AppSettings, CompleteTimerInput, CompleteTimerResult, CreateTaskInput, DayStat, ProjectStat,
-    SaveSettingsResult, SessionQuery, SessionStatus, StartTimerInput, Statistics,
-    StatisticsQuery, SwitchTimerModeInput, Task, TaskPriority, TimerMode,
+    AppSettings, CompleteTimerInput, CompleteTimerResult, CreateTaskInput, DayStat, ExportBundle,
+    ImportSummary, ProjectStat, SaveSettingsResult, SessionQuery, SessionStatus, StartTimerInput,
+    Statistics, StatisticsQuery, SwitchTimerModeInput, Task, TaskPriority, TimerMode,
     TimerSession, TimerSnapshot, TimerState, UpdateTaskInput,
 };
 
@@ -25,6 +25,10 @@ pub const MIN_DURATION_MINUTES: i64 = 1;
 pub const MAX_DURATION_MINUTES: i64 = 180;
 pub const MIN_DAILY_GOAL: i64 = 1;
 pub const MAX_DAILY_GOAL: i64 = 50;
+
+/// Backup bundle identity + version (Item 3: data export & backup).
+pub const EXPORT_APP_NAME: &str = "abyssal-reverie";
+pub const EXPORT_SCHEMA_VERSION: u32 = 1;
 
 const TASK_COLUMNS: &str = "id, title, done, pomodoro_target, priority, project, sort_order, \
                             created_at, updated_at, completed_at";
@@ -1031,6 +1035,175 @@ pub fn all_time_statistics(conn: &Connection) -> Result<Statistics, CommandError
     })
 }
 
+// ─── Data export & backup (Item 3) ──────────────────────────────────────────
+
+/// Builds a lossless JSON backup bundle: settings, all tasks, all sessions.
+pub fn export_data(conn: &Connection) -> Result<ExportBundle, CommandError> {
+    Ok(ExportBundle {
+        app: EXPORT_APP_NAME.to_owned(),
+        schema_version: EXPORT_SCHEMA_VERSION,
+        exported_at: now_millis(),
+        settings: get_settings(conn)?,
+        tasks: list_tasks(conn)?,
+        sessions: list_sessions(conn, i64::MAX)?,
+    })
+}
+
+/// Validates a parsed backup bundle before it touches the database.
+pub fn validate_import(bundle: &ExportBundle) -> Result<(), CommandError> {
+    if bundle.app != EXPORT_APP_NAME {
+        return Err(CommandError::validation("文件不是 Abyssal Reverie 备份"));
+    }
+    if bundle.schema_version > EXPORT_SCHEMA_VERSION {
+        return Err(CommandError::validation(format!(
+            "备份版本 {} 不受支持（当前最高 {}）",
+            bundle.schema_version, EXPORT_SCHEMA_VERSION
+        )));
+    }
+    validate_settings(&bundle.settings)?;
+    for task in &bundle.tasks {
+        validate_title(&task.title)?;
+        validate_pomodoro_target(task.pomodoro_target)?;
+    }
+    for session in &bundle.sessions {
+        if session.id.trim().is_empty() {
+            return Err(CommandError::validation("会话记录缺少 id 字段"));
+        }
+    }
+    Ok(())
+}
+
+/// Replaces tasks, sessions and settings in a single transaction, then resets
+/// the live timer to idle (preserving its mode) so a restored running/paused
+/// session does not dangle. Destructive — the caller must have confirmed.
+pub fn import_data(conn: &mut Connection, bundle: &ExportBundle) -> Result<ImportSummary, CommandError> {
+    validate_import(bundle)?;
+
+    let now = now_millis();
+    let tx = conn.transaction()?;
+
+    // Replace tasks (ids preserved from the backup).
+    tx.execute("DELETE FROM tasks", [])?;
+    for task in &bundle.tasks {
+        tx.execute(
+            "INSERT INTO tasks (id, title, done, pomodoro_target, priority, project, sort_order,
+                                created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                task.id,
+                task.title,
+                task.done as i64,
+                task.pomodoro_target,
+                task.priority.as_str(),
+                task.project,
+                task.sort_order,
+                task.created_at,
+                task.updated_at,
+                task.completed_at,
+            ],
+        )?;
+    }
+
+    // Replace sessions (ids preserved from the backup).
+    tx.execute("DELETE FROM sessions", [])?;
+    for session in &bundle.sessions {
+        tx.execute(
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, mode,
+                                   status, planned_seconds, focused_seconds, started_at, ended_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                session.id,
+                session.task_id,
+                session.task_title_snapshot,
+                session.project_snapshot,
+                session.mode.as_str(),
+                session.status.as_str(),
+                session.planned_seconds,
+                session.focused_seconds,
+                session.started_at,
+                session.ended_at,
+            ],
+        )?;
+    }
+
+    // Replace settings.
+    tx.execute(
+        "UPDATE settings SET focus_duration_minutes = ?1, short_break_minutes = ?2,
+                          long_break_minutes = ?3, auto_start_break = ?4,
+                          sound_enabled = ?5, notification_enabled = ?6,
+                          daily_goal = ?7, updated_at = ?8
+         WHERE id = 1",
+        params![
+            bundle.settings.focus_duration_minutes,
+            bundle.settings.short_break_minutes,
+            bundle.settings.long_break_minutes,
+            bundle.settings.auto_start_break as i64,
+            bundle.settings.sound_enabled as i64,
+            bundle.settings.notification_enabled as i64,
+            bundle.settings.daily_goal,
+            now,
+        ],
+    )?;
+
+    // Reset the live timer to idle for the restored current mode so no
+    // restored session id is left dangling as the active session.
+    let timer = get_timer(&tx)?;
+    if timer.state != TimerState::Idle {
+        let mut idle = TimerSnapshot::idle(timer.mode, bundle.settings.duration_seconds_for_mode(timer.mode));
+        idle.revision = timer.revision + 1;
+        idle.updated_at = now;
+        write_timer(&tx, &idle)?;
+    }
+
+    tx.commit()?;
+
+    Ok(ImportSummary {
+        path: String::new(),
+        tasks: bundle.tasks.len() as i64,
+        sessions: bundle.sessions.len() as i64,
+    })
+}
+
+/// Escapes a single CSV field per RFC 4180 (quote if it contains comma,
+/// quote, CR or LF; double internal quotes).
+fn csv_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
+}
+
+/// Builds a spreadsheet-friendly CSV of every session. Timestamps are emitted
+/// as epoch milliseconds (lossless, convertible in any spreadsheet) because the
+/// app stores them that way and avoids a date-formatting dependency.
+pub fn export_sessions_csv(conn: &Connection) -> Result<String, CommandError> {
+    let sessions = list_sessions(conn, i64::MAX)?;
+    let mut out = String::from(
+        "id,taskId,taskTitle,project,mode,status,plannedSeconds,focusedSeconds,\
+         plannedMinutes,focusedMinutes,startedAt,endedAt\n",
+    );
+    for session in &sessions {
+        let row = [
+            csv_field(&session.id),
+            csv_field(session.task_id.as_deref().unwrap_or("")),
+            csv_field(&session.task_title_snapshot),
+            csv_field(&session.project_snapshot),
+            session.mode.as_str().to_owned(),
+            session.status.as_str().to_owned(),
+            session.planned_seconds.to_string(),
+            session.focused_seconds.to_string(),
+            (session.planned_seconds / 60).to_string(),
+            (session.focused_seconds / 60).to_string(),
+            session.started_at.to_string(),
+            session.ended_at.to_string(),
+        ];
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1816,5 +1989,91 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    // ─── Data export & backup tests (Item 3) ───────────────────────────────
+
+    #[test]
+    fn export_then_import_round_trips_all_data() {
+        let mut conn = db::open_in_memory().expect("db");
+
+        let task = insert_task(&conn, &CreateTaskInput {
+            title: "Backup me".to_owned(),
+            pomodoro_target: 6,
+            priority: TaskPriority::Low,
+            project: "Archive".to_owned(),
+        }).expect("insert");
+
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: Some(task.id.clone()),
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+        complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 1, active_session_id: session_id, recovery: None,
+        }).expect("complete");
+
+        let bundle = export_data(&conn).expect("export");
+        assert_eq!(bundle.app, "abyssal-reverie");
+        assert_eq!(bundle.tasks.len(), 1);
+        assert_eq!(bundle.sessions.len(), 1);
+
+        // Mutate the live DB, then import the bundle back.
+        delete_task(&conn, &task.id).expect("delete");
+        assert!(list_tasks(&conn).expect("list").is_empty());
+
+        let summary = import_data(&mut conn, &bundle).expect("import");
+        assert_eq!(summary.tasks, 1);
+        assert_eq!(summary.sessions, 1);
+
+        let restored = list_tasks(&conn).expect("list");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].title, "Backup me");
+        assert_eq!(restored[0].project, "Archive");
+        assert_eq!(list_sessions(&conn, 10).expect("sessions").len(), 1);
+    }
+
+    #[test]
+    fn import_resets_a_running_timer_to_idle() {
+        let mut conn = db::open_in_memory().expect("db");
+
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Short, selected_task_id: None,
+        }).expect("start");
+        assert_eq!(timer.state, TimerState::Running);
+
+        let bundle = export_data(&conn).expect("export");
+        // Simulate a foreign backup whose settings differ; import must still
+        // reset the live timer to idle for the restored mode.
+        let summary = import_data(&mut conn, &bundle).expect("import");
+        assert_eq!(summary.sessions, 0);
+
+        let restored = get_timer(&conn).expect("timer");
+        assert_eq!(restored.state, TimerState::Idle);
+        assert_eq!(restored.mode, TimerMode::Short);
+        assert_eq!(restored.active_session_id, None);
+    }
+
+    #[test]
+    fn import_rejects_a_non_abyssal_backup() {
+        let mut conn = db::open_in_memory().expect("db");
+        let mut bundle = export_data(&conn).expect("export");
+        bundle.app = "some-other-app".to_owned();
+
+        let result = import_data(&mut conn, &bundle);
+        assert!(matches!(result, Err(ref e) if e.code == crate::error::ErrorCode::ValidationError));
+    }
+
+    #[test]
+    fn export_sessions_csv_escapes_special_characters() {
+        let conn = db::open_in_memory().expect("db");
+        seed_session(&conn, "s,1", TimerMode::Focus, SessionStatus::Completed, "Pro,ject", 1500);
+
+        let csv = export_sessions_csv(&conn).expect("csv");
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 2, "header + one row");
+        assert!(lines[0].starts_with("id,taskId,taskTitle,project"), "header present");
+        // Comma-bearing id and project must be quoted.
+        assert!(lines[1].contains("\"s,1\""), "id with comma is quoted: {}", lines[1]);
+        assert!(lines[1].contains("\"Pro,ject\""), "project with comma is quoted: {}", lines[1]);
     }
 }

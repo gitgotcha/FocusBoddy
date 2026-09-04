@@ -357,6 +357,48 @@ pub struct StatisticsQuery {
     pub days: Vec<StatisticsDayBoundary>,
 }
 
+// ─── Data export & backup (Item 3) ─────────────────────────────────────────
+
+/// Full backup bundle. JSON-serialized for restore; never CSV (lossless).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportBundle {
+    pub app: String,
+    pub schema_version: u32,
+    pub exported_at: i64,
+    pub settings: AppSettings,
+    pub tasks: Vec<Task>,
+    pub sessions: Vec<TimerSession>,
+}
+
+/// Row counts shown to the user before a destructive import is confirmed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub schema_version: u32,
+    pub tasks: i64,
+    pub sessions: i64,
+}
+
+/// Result of a successful export (bytes written to disk).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSummary {
+    pub path: String,
+    pub bytes: u64,
+    pub tasks: i64,
+    pub sessions: i64,
+}
+
+/// Result of a successful import (rows replaced in the database).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSummary {
+    pub path: String,
+    pub tasks: i64,
+    pub sessions: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

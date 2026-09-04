@@ -6,6 +6,9 @@ import type {
   CompleteTimerInput,
   CompleteTimerResult,
   CreateTaskInput,
+  ExportSummary,
+  ImportPreview,
+  ImportSummary,
   SaveSettingsResult,
   SessionQuery,
   StartTimerInput,
@@ -366,6 +369,39 @@ export class FakeAppGateway implements AppGateway {
     this.takeFailure()
     this.launchAtLogin = enabled
     return enabled
+  }
+
+  // --- Data export & backup (no-op stubs for tests) ---
+
+  async pickExportPath(suggestedName: string): Promise<string | null> {
+    this.takeFailure()
+    return `${suggestedName}.json`
+  }
+
+  async pickImportPath(): Promise<string | null> {
+    this.takeFailure()
+    return 'import.json'
+  }
+
+  async exportBackup(_path: string): Promise<ExportSummary> {
+    this.takeFailure()
+    return { path: _path, bytes: 0, tasks: this.tasks.length, sessions: this.sessions.length }
+  }
+
+  async exportSessionsCsv(_path: string): Promise<ExportSummary> {
+    this.takeFailure()
+    return { path: _path, bytes: 0, tasks: 0, sessions: this.sessions.length }
+  }
+
+  async previewImport(_path: string): Promise<ImportPreview> {
+    this.takeFailure()
+    return { schemaVersion: 1, tasks: this.tasks.length, sessions: this.sessions.length }
+  }
+
+  async importBackup(_path: string): Promise<ImportSummary> {
+    this.takeFailure()
+    // Mirror the Rust replace: wipe and re-seed from the (fake) current data.
+    return { path: _path, tasks: this.tasks.length, sessions: this.sessions.length }
   }
 
   private expectedRevision(input: TimerRevisionInput): number {

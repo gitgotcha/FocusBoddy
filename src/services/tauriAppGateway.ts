@@ -8,6 +8,9 @@ import type {
   CompleteTimerInput,
   CompleteTimerResult,
   CreateTaskInput,
+  ExportSummary,
+  ImportPreview,
+  ImportSummary,
   SaveSettingsResult,
   SessionQuery,
   StartTimerInput,
@@ -62,4 +65,15 @@ export class TauriAppGateway implements AppGateway {
 
   getAutostart() { return invoke<boolean>('get_autostart') }
   setAutostart(enabled: boolean) { return invoke<boolean>('set_autostart', { enabled }) }
+
+  // ─── Data export & backup (Item 3) ───────────────────────────────────────
+
+  pickExportPath(suggestedName: string) {
+    return invoke<string | null>('pick_export_path', { suggestedName })
+  }
+  pickImportPath() { return invoke<string | null>('pick_import_path') }
+  exportBackup(path: string) { return invoke<ExportSummary>('export_backup_to', { path }) }
+  exportSessionsCsv(path: string) { return invoke<ExportSummary>('export_sessions_csv_to', { path }) }
+  previewImport(path: string) { return invoke<ImportPreview>('preview_import_from', { path }) }
+  importBackup(path: string) { return invoke<ImportSummary>('import_backup_from', { path }) }
 }

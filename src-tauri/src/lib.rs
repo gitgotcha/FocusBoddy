@@ -83,6 +83,7 @@ pub fn run() {
                 })
                 .build(),
         )
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let db_path = data_dir.join("abyssal-reverie.sqlite");
@@ -133,6 +134,12 @@ pub fn run() {
             commands::complete_timer,
             commands::list_sessions,
             commands::get_statistics,
+            commands::pick_export_path,
+            commands::pick_import_path,
+            commands::export_backup_to,
+            commands::export_sessions_csv_to,
+            commands::preview_import_from,
+            commands::import_backup_from,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Abyssal Reverie");

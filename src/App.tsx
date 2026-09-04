@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { AppSettings, Statistics, Task, TaskPriority, TimerMode, TimerSession, TimerSnapshot } from "./domain/models";
+import type { AppSettings, ImportPreview, Statistics, Task, TaskPriority, TimerMode, TimerSession, TimerSnapshot } from "./domain/models";
 import { DEFAULT_SETTINGS, durationSecondsForMode } from "./domain/defaults";
 import { weekBoundaries, weekRange } from "./domain/statistics";
 import { formatTrayIndicator } from "./domain/tray";
@@ -841,9 +841,10 @@ function TasksPanel({ tasks, onCreateTask, onToggleTask, onDeleteTask, onCyclePr
 }
 
 // ─── Settings Panel ───────────────────────────────────────────────────────────
-function SettingsPanel({ settings, onSaveSettings }: {
+function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
   settings: AppSettings | null;
   onSaveSettings: (settings: AppSettings) => Promise<unknown>;
+  onDataChanged: () => void;
 }) {
   const gateway = useAppGateway();
   const [draft, setDraft] = useState<AppSettings | null>(settings);
@@ -884,6 +885,90 @@ function SettingsPanel({ settings, onSaveSettings }: {
     setLaunchAtLogin(next);
     gateway.setAutostart(next).then(setLaunchAtLogin).catch(() => undefined);
   }, [gateway]);
+
+  // ─── Data export & backup (Item 3) ──────────────────────────────────────────
+  const [busy, setBusy] = useState<null | 'backup' | 'csv' | 'import'>(null);
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [pendingImportPath, setPendingImportPath] = useState<string | null>(null);
+
+  const errText = (e: unknown) =>
+    e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : '操作失败';
+
+  const suggestedBackupName = () => {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+    return `abyssal-reverie-backup-${stamp}.json`;
+  };
+
+  const handleExportBackup = useCallback(async () => {
+    setBusy('backup');
+    setStatus(null);
+    try {
+      const path = await gateway.pickExportPath(suggestedBackupName());
+      if (!path) { setBusy(null); return; }
+      const summary = await gateway.exportBackup(path);
+      setStatus({ ok: true, text: `已导出备份（${summary.tasks} 个任务、${summary.sessions} 条会话，${(summary.bytes / 1024).toFixed(1)} KB）` });
+    } catch (e) {
+      setStatus({ ok: false, text: errText(e) });
+    } finally {
+      setBusy(null);
+    }
+  }, [gateway]);
+
+  const handleExportCsv = useCallback(async () => {
+    setBusy('csv');
+    setStatus(null);
+    try {
+      const path = await gateway.pickExportPath('abyssal-reverie-sessions.csv');
+      if (!path) { setBusy(null); return; }
+      const summary = await gateway.exportSessionsCsv(path);
+      setStatus({ ok: true, text: `已导出会话 CSV（${summary.sessions} 条记录）` });
+    } catch (e) {
+      setStatus({ ok: false, text: errText(e) });
+    } finally {
+      setBusy(null);
+    }
+  }, [gateway]);
+
+  const handlePickImport = useCallback(async () => {
+    setBusy('import');
+    setStatus(null);
+    try {
+      const path = await gateway.pickImportPath();
+      if (!path) { setBusy(null); return; }
+      const preview = await gateway.previewImport(path);
+      setPendingImportPath(path);
+      setImportPreview(preview);
+    } catch (e) {
+      setStatus({ ok: false, text: errText(e) });
+    } finally {
+      setBusy(null);
+    }
+  }, [gateway]);
+
+  const confirmImport = useCallback(async () => {
+    if (!pendingImportPath) return;
+    const path = pendingImportPath;
+    setImportPreview(null);
+    setPendingImportPath(null);
+    setBusy('import');
+    try {
+      const summary = await gateway.importBackup(path);
+      setStatus({ ok: true, text: `已导入（${summary.tasks} 个任务、${summary.sessions} 条会话），当前数据已覆盖` });
+      onDataChanged();
+    } catch (e) {
+      setStatus({ ok: false, text: errText(e) });
+    } finally {
+      setBusy(null);
+    }
+  }, [pendingImportPath, gateway, onDataChanged]);
+
+  const cancelImport = useCallback(() => {
+    setImportPreview(null);
+    setPendingImportPath(null);
+  }, []);
 
   const Toggle = ({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) => (
     <button onClick={() => onChange(!value)} className="btn-toggle"
@@ -944,6 +1029,20 @@ function SettingsPanel({ settings, onSaveSettings }: {
     </div>
   );
 
+  const ActionButton = ({ label, onClick, disabled, danger }: {
+    label: string; onClick: () => void; disabled?: boolean; danger?: boolean;
+  }) => (
+    <button onClick={onClick} disabled={disabled} className="btn-action"
+      style={{
+        padding:"5px 14px", borderRadius:7, fontSize:11, fontFamily:"var(--font-sans)",
+        cursor: disabled ? "default" : "pointer", outline:"none",
+        color: danger ? "rgba(231,138,138,0.95)" : C.textPrimary,
+        background: danger ? "rgba(231,138,138,0.10)" : C.cardDim,
+        border:`1px solid ${danger ? "rgba(231,138,138,0.30)" : C.hairline}`,
+        opacity: disabled ? 0.45 : 1,
+      }}>{label}</button>
+  );
+
   if (!draft) {
     return (
       <div className="flex flex-col h-full" style={{ position:"relative", zIndex:2 }}>
@@ -987,12 +1086,55 @@ function SettingsPanel({ settings, onSaveSettings }: {
           <Row label="开机自动启动" hint="登录 Windows 后于后台自动运行"><Toggle value={launchAtLogin ?? false} onChange={toggleLaunchAtLogin} /></Row>
           <Row label="全局快捷键" hint="Ctrl + Alt + 空格：开始 / 暂停（窗口隐藏时也能用）" last><span style={{ fontFamily:"var(--font-mono)", fontSize:10, color:C.textMuted }}>Ctrl+Alt+Space</span></Row>
         </Section>
+        <Section label="数据">
+          <Row label="导出备份" hint="保存全部任务、会话与设置为 JSON 文件">
+            <ActionButton label={busy === 'backup' ? '导出中…' : '导出'} onClick={handleExportBackup} disabled={busy !== null} />
+          </Row>
+          <Row label="导出会话" hint="导出全部专注 / 休息记录为 CSV 表格">
+            <ActionButton label={busy === 'csv' ? '导出中…' : '导出'} onClick={handleExportCsv} disabled={busy !== null} />
+          </Row>
+          <Row label="导入备份" hint="从 JSON 备份恢复，将覆盖当前数据" last>
+            <ActionButton label={busy === 'import' ? '读取中…' : '导入'} onClick={handlePickImport} disabled={busy !== null} />
+          </Row>
+          {status && (
+            <div style={{
+              padding:"9px 13px", fontSize:10, lineHeight:1.5,
+              color: status.ok ? "rgba(126,200,180,0.92)" : "rgba(231,138,138,0.95)",
+              fontFamily:"var(--font-sans)",
+            }}>{status.text}</div>
+          )}
+        </Section>
         <div style={{ ...CARD, borderRadius:12, padding:"11px 13px", marginBottom:20 }}>
           <div style={{ fontSize:9, color:"rgba(165,182,188,0.34)", marginBottom:4, fontFamily:"var(--font-sans)", letterSpacing:"0.10em", textTransform:"uppercase" }}>关于</div>
           <div style={{ fontSize:12, color:C.textSec, fontFamily:"var(--font-sans)" }}>深海专注 · 桌面计时器</div>
           <div style={{ fontSize:10, color:C.textMuted, marginTop:2, fontFamily:"var(--font-mono)", letterSpacing:"0.04em" }}>v1.0.0 · 2026</div>
         </div>
       </div>
+      {importPreview && (
+        <div
+          onClick={cancelImport}
+          style={{
+            position:"fixed", inset:0, zIndex:50,
+            background:"rgba(4,8,12,0.55)",
+            display:"flex", alignItems:"center", justifyContent:"center",
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{ ...CARD, width:300, padding:16, borderRadius:14 }}
+          >
+            <div style={{ fontSize:13, color:C.textPrimary, fontFamily:"var(--font-sans)", marginBottom:8 }}>确认导入备份？</div>
+            <div style={{ fontSize:11, color:C.textSec, fontFamily:"var(--font-sans)", lineHeight:1.7, marginBottom:14 }}>
+              将导入 <b style={{ color:C.textPrimary }}>{importPreview.tasks}</b> 个任务、<b style={{ color:C.textPrimary }}>{importPreview.sessions}</b> 条会话，<br />
+              并<b style={{ color:"rgba(231,138,138,0.95)" }}>覆盖当前所有数据</b>（不可撤销）。
+            </div>
+            <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
+              <ActionButton label="取消" onClick={cancelImport} />
+              <ActionButton label="确认导入" onClick={confirmImport} disabled={busy !== null} danger />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1555,7 +1697,7 @@ export default function App() {
         />
       );
       case "stats":    return <StatsPage  logs={logs} sessionCount={focusSessionCount} stats={weekStats} />;
-      case "settings": return <SettingsPanel settings={settings} onSaveSettings={saveSettings} />;
+      case "settings": return <SettingsPanel settings={settings} onSaveSettings={saveSettings} onDataChanged={() => { resync(); refreshStats(); }} />;
     }
   })();
 

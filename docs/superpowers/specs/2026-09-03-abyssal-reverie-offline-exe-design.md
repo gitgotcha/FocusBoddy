@@ -25,6 +25,13 @@
 > - 开机自启：`tauri-plugin-autostart`；设置页"开机自动启动"开关，命令 `get_autostart`/`set_autostart` 包裹 `app.autolaunch()`。状态存于插件/系统注册表，**不进本项目 SQLite**（无需迁移 settings 表，且自启本属 OS 级关注）。
 > - 全局快捷键：`tauri-plugin-global-shortcut`，固定 `CommandOrControl+Alt+Space`（显示为 Ctrl+Alt+空格）。handler 显示窗口并 `emit("tray-action", TrayAction::Toggle)`，复用已有的 pause/resume/显示逻辑（运行中→暂停、暂停中→继续、空闲→显示窗口）。
 >
+> **范围变更（2026-09-04，第 3 项）**：数据导出与备份已从"非目标"提升为已实现能力。
+> - 导出备份（JSON）：`export_data` 拼装 `{ app, schemaVersion, exportedAt, settings, tasks, sessions }`，`export_backup_to` 经 `serde_json::to_string_pretty` + `std::fs::write` 落盘。
+> - 导出会话（CSV）：`export_sessions_csv` 手工 RFC-4180 转义（含逗号/引号/换行的字段加引号并双写内部引号），时间戳以 epoch 毫秒输出（无日期格式化依赖）。
+> - 导入备份（JSON）：`preview_import_from` 只读解析 + `validate_import` 校验（`app` 名、`schemaVersion` 上限、`settings` 范围、任务/会话字段），`import_backup_from` 在单事务内 `DELETE` 后按原 id `INSERT` 任务与会话、`UPDATE` 设置，并将运行中 timer 重置为当前 mode 的 idle（避免悬空 activeSessionId）。导入具有破坏性，前端先弹确认框展示"将导入 N 个任务、M 条会话并覆盖当前数据"。
+> - 文件选择全部走 Rust 原生对话框（`tauri-plugin-dialog` 的 `blocking_save_file` / `blocking_pick_file`），前端只经 `AppGateway` 暴露 `pickExportPath`/`pickImportPath` 等，保持唯一 IPC 边界、不引入 JS dialog 依赖。
+> - 新增 Rust commands：`pick_export_path`、`pick_import_path`、`export_backup_to`、`export_sessions_csv_to`、`preview_import_from`、`import_backup_from`（已注册进 `invoke_handler`，能力新增 `dialog:default`）。
+>
 > 仍不包含：代码签名（见最后正式打包步骤）。
 
 应用不启动本地 HTTP 服务，不监听本地业务端口，不依赖网络下载运行时资源。
@@ -128,6 +135,12 @@ export interface AppGateway {
   saveSettings(input: AppSettings): Promise<SaveSettingsResult>;
   listSessions(query: SessionQuery): Promise<TimerSession[]>;
   getStatistics(query: StatisticsQuery): Promise<Statistics>;
+  pickExportPath(suggestedName: string): Promise<string | null>;
+  pickImportPath(): Promise<string | null>;
+  exportBackup(path: string): Promise<ExportSummary>;
+  exportSessionsCsv(path: string): Promise<ExportSummary>;
+  previewImport(path: string): Promise<ImportPreview>;
+  importBackup(path: string): Promise<ImportSummary>;
 }
 ```
 
@@ -146,6 +159,9 @@ export interface AppGateway {
 - `save_settings`
 - `list_sessions`
 - `get_statistics`
+- `pick_export_path` / `pick_import_path`（原生对话框）
+- `export_backup_to` / `export_sessions_csv_to`（写文件）
+- `preview_import_from` / `import_backup_from`（只读校验 / 事务替换）
 
 ### 4.1 原子状态转换
 
