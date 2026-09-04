@@ -463,12 +463,54 @@ pub struct CompleteTimerResult {
     pub newly_completed: bool,
 }
 
+/// Which sessions a query may return (v1.1 spec §10.4).
+///
+/// - `activity`: only statistics-eligible focus sessions — the activity bar
+///   and every user-visible page. Reset/abandoned/too_short/break records
+///   never leak through.
+/// - `all`: everything, for exports, backups and tests only. Defaults to
+///   `activity` so legacy callers cannot accidentally leak hidden records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionScope {
+    Activity,
+    All,
+}
+
+impl Default for SessionScope {
+    fn default() -> Self {
+        SessionScope::Activity
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionQuery {
     pub limit: Option<i64>,
     pub from: Option<i64>,
     pub to: Option<i64>,
+    #[serde(default)]
+    pub scope: Option<SessionScope>,
+}
+
+/// `finish_timer` input (v1.1 §8.5): user clicks "结束".
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinishTimerInput {
+    pub expected_revision: i64,
+    pub active_session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinishTimerResult {
+    pub timer: TimerSnapshot,
+    pub session: TimerSession,
+    pub statistics: Statistics,
+    /// False when the session already existed (idempotent replay).
+    pub newly_finished: bool,
+    pub statistics_eligible: bool,
+    pub qualification_reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

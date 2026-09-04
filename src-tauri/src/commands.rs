@@ -9,10 +9,10 @@ use tauri_plugin_dialog::DialogExt;
 use crate::error::CommandError;
 use crate::models::{
     AppSettings, BootstrapPayload, CompleteTimerInput, CompleteTimerResult, CreateTagInput,
-    CreateTaskInput, DeleteTagResult, ExportBundle, ExportSummary, ImportPreview, ImportSummary,
-    SaveSettingsResult, SessionQuery, StartTimerInput, Statistics, StatisticsQuery,
-    SwitchTimerModeInput, Tag, TagDeletePreview, Task, TimerRevisionInput, TimerSession,
-    TimerSnapshot, UpdateTagInput, UpdateTaskInput,
+    CreateTaskInput, DeleteTagResult, ExportBundle, ExportSummary, FinishTimerInput,
+    FinishTimerResult, ImportPreview, ImportSummary, SaveSettingsResult, SessionQuery,
+    StartTimerInput, Statistics, StatisticsQuery, SwitchTimerModeInput, Tag, TagDeletePreview,
+    Task, TimerRevisionInput, TimerSession, TimerSnapshot, UpdateTagInput, UpdateTaskInput,
 };
 use crate::repository;
 use crate::AppState;
@@ -155,6 +155,15 @@ pub fn complete_timer(state: State<'_, AppState>, input: CompleteTimerInput) -> 
 }
 
 // ─── Sessions and statistics ─────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn finish_timer(
+    state: State<'_, AppState>,
+    input: FinishTimerInput,
+) -> Result<FinishTimerResult, CommandError> {
+    let mut conn = lock_db(&state)?;
+    repository::finish_timer(&mut conn, &input)
+}
 
 #[tauri::command]
 pub fn list_sessions(state: State<'_, AppState>, query: SessionQuery) -> Result<Vec<TimerSession>, CommandError> {

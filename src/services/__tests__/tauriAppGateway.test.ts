@@ -132,4 +132,16 @@ describe('TauriAppGateway', () => {
     expect(invokeMock).toHaveBeenCalledWith('reorder_tag', { input: { id: 'tag-1', direction: -1 } })
     expect(invokeMock).toHaveBeenCalledWith('delete_tag', { id: 'tag-1' })
   })
+
+  it('maps finish_timer (v1.1)', async () => {
+    invokeMock.mockResolvedValue({})
+    const gateway = new TauriAppGateway()
+
+    await gateway.finishTimer({ expectedRevision: 1, activeSessionId: 'session-9' })
+
+    expect(invokeMock.mock.calls.map(([name]) => name)).toEqual(['finish_timer'])
+    expect(invokeMock).toHaveBeenCalledWith('finish_timer', {
+      input: { expectedRevision: 1, activeSessionId: 'session-9' },
+    })
+  })
 })

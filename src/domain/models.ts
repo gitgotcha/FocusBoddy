@@ -133,6 +133,23 @@ export interface CommandError {
   message: string
 }
 
+/** v1.1 §10.4 — which sessions a query may return. */
+export type SessionScope = 'activity' | 'all'
+
+export interface FinishTimerInput {
+  expectedRevision: number
+  activeSessionId: string
+}
+
+export interface FinishTimerResult {
+  timer: TimerSnapshot
+  session: TimerSession
+  statistics: Statistics
+  newlyFinished: boolean
+  statisticsEligible: boolean
+  qualificationReason: string
+}
+
 export interface CreateTaskInput {
   title: string
   pomodoroTarget: number
@@ -174,6 +191,8 @@ export interface SessionQuery {
   limit?: number
   from?: number
   to?: number
+  /** Defaults to 'activity' — hidden records need an explicit 'all'. */
+  scope?: SessionScope
 }
 
 export interface StatisticsQuery {

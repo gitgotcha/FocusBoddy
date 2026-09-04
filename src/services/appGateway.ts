@@ -7,6 +7,8 @@ import type {
   CreateTaskInput,
   DeleteTagResult,
   ExportSummary,
+  FinishTimerInput,
+  FinishTimerResult,
   ImportPreview,
   ImportSummary,
   ReorderTagInput,
@@ -35,6 +37,8 @@ export interface AppGateway {
   resetTimer(input: TimerRevisionInput): Promise<TimerSnapshot>
   switchTimerMode(input: SwitchTimerModeInput): Promise<TimerSnapshot>
   completeTimer(input: CompleteTimerInput): Promise<CompleteTimerResult>
+  /** v1.1: manual "结束" — records actual focused time; timer returns to idle. */
+  finishTimer(input: FinishTimerInput): Promise<FinishTimerResult>
   createTask(input: CreateTaskInput): Promise<Task>
   updateTask(input: UpdateTaskInput): Promise<Task>
   deleteTask(id: string): Promise<void>

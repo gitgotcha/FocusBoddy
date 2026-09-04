@@ -4,10 +4,10 @@ use uuid::Uuid;
 use crate::error::CommandError;
 use crate::models::{
     AppSettings, CompleteTimerInput, CompleteTimerResult, CreateTagInput, CreateTaskInput, DayStat,
-    DeleteTagResult, ExportBundle, ImportSummary, ProjectStat, SaveSettingsResult, SessionQuery,
-    SessionStatus, StartTimerInput, Statistics, StatisticsQuery, SwitchTimerModeInput, Tag,
-    TagDeletePreview, TagKind, Task, TaskPriority, TimerMode, TimerSession, TimerSnapshot,
-    TimerState, UpdateTagInput, UpdateTaskInput,
+    DeleteTagResult, ExportBundle, FinishTimerInput, FinishTimerResult, ImportSummary, ProjectStat,
+    SaveSettingsResult, SessionQuery, SessionStatus, StartTimerInput, Statistics,
+    StatisticsQuery, SwitchTimerModeInput, Tag, TagDeletePreview, TagKind, Task, TaskPriority,
+    TimerMode, TimerSession, TimerSnapshot, TimerState, UpdateTagInput, UpdateTaskInput,
 };
 
 // ─── Fixed snapshot labels (design spec §3) ──────────────────────────────────
@@ -47,6 +47,12 @@ const SESSION_COLUMNS: &str = "id, task_id, task_title_snapshot, project_snapsho
 /// Focus sessions shorter than this never enter statistics (v1.1 rule: 29s
 /// excluded, 30s counted). Rust is the only place this rule lives.
 pub const MIN_QUALIFYING_FOCUS_SECONDS: i64 = 30;
+
+/// Natural completion (`complete_timer`) is allowed while the countdown is
+/// within this many milliseconds of its deadline — a small tolerance that
+/// absorbs timer/scheduler jitter. Anything earlier must use `finish_timer`
+/// (manual "结束") or `reset_timer` (v1.1 ruling, review round 3).
+pub const COMPLETE_SCHEDULING_TOLERANCE_MS: i64 = 250;
 
 pub fn now_millis() -> i64 {
     std::time::SystemTime::now()
@@ -708,9 +714,13 @@ pub fn get_timer(conn: &Connection) -> Result<TimerSnapshot, CommandError> {
     .map_err(Into::into)
 }
 
+/// Activity-view listing: bootstrap and user-visible pages see only
+/// statistics-eligible focus sessions (v1.1 ruling). Hidden records survive
+/// in exports (`scope = all`).
 pub fn list_sessions(conn: &Connection, limit: i64) -> Result<Vec<TimerSession>, CommandError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {SESSION_COLUMNS} FROM sessions ORDER BY started_at DESC, rowid DESC LIMIT ?1"
+        "SELECT {SESSION_COLUMNS} FROM sessions WHERE statistics_eligible = 1
+         ORDER BY started_at DESC, rowid DESC LIMIT ?1"
     ))?;
     let rows = stmt.query_map(params![limit], session_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -734,9 +744,11 @@ fn snapshot_for_mode(mode: TimerMode, task: Option<&Task>) -> (String, String) {
 }
 
 /// Live remaining seconds for a running timer, derived from `target_end_at`.
+/// Rounds UP (ceiling) per spec §8.1 so a 29.x-second focus can never be
+/// misjudged as 30 seconds at settlement time.
 fn live_remaining(timer: &TimerSnapshot, now: i64) -> i64 {
     match timer.target_end_at {
-        Some(end) => ((end - now) / 1000).max(0),
+        Some(end) => (((end - now) + 999) / 1000).max(0),
         None => timer.remaining_seconds,
     }
 }
@@ -1056,9 +1068,16 @@ pub fn switch_timer_mode(
     Ok(timer)
 }
 
-/// `complete_timer`: running → done. Idempotent — if a completed session with
-/// the same `activeSessionId` already exists, returns it with
-/// `newlyCompleted = false`. If an abandoned session exists, returns CONFLICT.
+/// `complete_timer`: the NATURAL-completion path (running → done). Idempotent
+/// — if a completed session with the same `activeSessionId` already exists,
+/// returns it with `newlyCompleted = false`. If an abandoned session exists,
+/// returns CONFLICT.
+///
+/// v1.1 ruling: this command may only fire when the countdown has actually
+/// reached (or is within `COMPLETE_SCHEDULING_TOLERANCE_MS` of) its deadline.
+/// An early call returns CONFLICT without writing a session, changing the
+/// timer, or producing any notification — a rendering bug must never end a
+/// running focus session. Ending early is `finish_timer`'s job.
 pub fn complete_timer(
     conn: &mut Connection,
     _settings: &AppSettings,
@@ -1117,8 +1136,26 @@ pub fn complete_timer(
         _ => return Err(CommandError::validation("activeSessionId does not match timer")),
     }
 
-    // 4: Compute focused time from target_end_at (drift-free).
+    // 3b: Deadline guard (v1.1 ruling) — recompute the remaining time from the
+    // wall clock and reject early calls. The idempotency branch above has
+    // already handled replays, so this cannot block a legitimate completion.
     let now = now_millis();
+    let remaining_ms = match timer.target_end_at {
+        Some(end) => end - now,
+        None => {
+            return Err(CommandError::conflict(
+                "running timer has no target_end_at; cannot complete naturally",
+            ))
+        }
+    };
+    if remaining_ms > COMPLETE_SCHEDULING_TOLERANCE_MS {
+        return Err(CommandError::conflict(format!(
+            "timer has not expired yet ({remaining_ms}ms remaining); \
+             use finish_timer to end it early"
+        )));
+    }
+
+    // 4: Compute focused time from the same `now` used by the deadline guard.
     let actual_remaining = live_remaining(&timer, now);
     let focused = (timer.duration_seconds - actual_remaining).max(0);
     // 30-second qualification lives here and nowhere else (v1.1 §8.2).
@@ -1214,6 +1251,194 @@ pub fn complete_timer(
 /// is cleared, `paused_at` is stamped, and the revision is bumped. The WAL is
 /// checkpointed so the change survives the imminent process exit even with
 /// `synchronous=NORMAL`.
+/// `finish_timer` (v1.1 §8.5): the user clicks "结束" — the session is saved
+/// with its actual focused time and the timer returns to the current mode's
+/// idle state (natural completion still ends in `done` with sound+notification).
+///
+/// Idempotency is checked BEFORE the revision/state validation (review #5):
+/// a replayed command with a stale revision returns the recorded session with
+/// `newly_finished = false` instead of a conflict. A lost race against
+/// `complete_timer` is handled the same way — exactly one session, one effect.
+pub fn finish_timer(
+    conn: &mut Connection,
+    input: &FinishTimerInput,
+) -> Result<FinishTimerResult, CommandError> {
+    let tx = conn.transaction()?;
+
+    // 1) Idempotency first: an existing session for this id wins over every
+    //    other check (stale revision included).
+    let existing: Option<(String, i64, String)> = tx
+        .query_row(
+            "SELECT finish_reason, statistics_eligible, qualification_reason
+             FROM sessions WHERE id = ?1",
+            params![input.active_session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+
+    if let Some((_, eligible, qualification)) = &existing {
+        let session = tx
+            .query_row(
+                &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
+                params![input.active_session_id],
+                session_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| CommandError::internal("finished session disappeared mid-query"))?;
+        let timer = get_timer(&tx)?;
+        let stats = all_time_statistics(&tx)?;
+        return Ok(FinishTimerResult {
+            timer,
+            session,
+            statistics: stats,
+            newly_finished: false,
+            statistics_eligible: *eligible != 0,
+            qualification_reason: qualification.clone(),
+        });
+    }
+
+    // 2) No session yet — validate timer state, active session, revision.
+    let mut timer = get_timer(&tx)?;
+    check_revision(&timer, input.expected_revision)?;
+
+    if timer.state != TimerState::Running && timer.state != TimerState::Paused {
+        return Err(CommandError::conflict(format!(
+            "finish_timer requires a running or paused timer, found {:?}",
+            timer.state
+        )));
+    }
+    match &timer.active_session_id {
+        Some(id) if id == &input.active_session_id => {}
+        _ => return Err(CommandError::conflict("activeSessionId does not match timer")),
+    }
+
+    // 3) Drift-free focused time; remaining is ceiling-rounded so 29.x seconds
+    //    can never count as 30 (spec §8.1).
+    let now = now_millis();
+    let effective_remaining = match timer.state {
+        TimerState::Running => live_remaining(&timer, now),
+        _ => timer.remaining_seconds,
+    };
+    let focused = (timer.duration_seconds - effective_remaining).max(0);
+    // The 30-second rule lives here and nowhere else.
+    let eligible = timer.mode == TimerMode::Focus && focused >= MIN_QUALIFYING_FOCUS_SECONDS;
+    let qualification = if timer.mode != TimerMode::Focus {
+        "non_focus"
+    } else if eligible {
+        "qualified"
+    } else {
+        "too_short"
+    };
+    let (fallback_id, fallback_name) = fallback_tag(&tx)?;
+
+    let session = TimerSession {
+        id: input.active_session_id.clone(),
+        task_id: timer.selected_task_id.clone(),
+        task_title_snapshot: timer
+            .task_title_snapshot
+            .clone()
+            .unwrap_or_else(|| NO_TASK_TITLE.to_owned()),
+        project_snapshot: timer
+            .project_snapshot
+            .clone()
+            .unwrap_or_else(|| NO_TASK_PROJECT.to_owned()),
+        tag_id: Some(timer.tag_id.clone().unwrap_or_else(|| fallback_id.clone())),
+        tag_name_snapshot: Some(
+            timer
+                .tag_name_snapshot
+                .clone()
+                .unwrap_or_else(|| fallback_name.clone()),
+        ),
+        mode: timer.mode,
+        status: SessionStatus::Completed,
+        planned_seconds: timer.duration_seconds,
+        focused_seconds: focused,
+        started_at: timer.started_at.unwrap_or(now),
+        ended_at: now,
+        finish_reason: Some("manual_finish".to_owned()),
+        statistics_eligible: Some(eligible),
+        qualification_reason: Some(qualification.to_owned()),
+    };
+
+    // 4) Same transaction: insert (ON CONFLICT guards the complete_timer race)
+    //    + timer back to idle + statistics read.
+    let inserted = tx.execute(
+        "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                               tag_name_snapshot, mode, status, planned_seconds,
+                               focused_seconds, started_at, ended_at, finish_reason,
+                               statistics_eligible, qualification_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            session.id,
+            session.task_id,
+            session.task_title_snapshot,
+            session.project_snapshot,
+            session.tag_id,
+            session.tag_name_snapshot,
+            session.mode.as_str(),
+            session.status.as_str(),
+            session.planned_seconds,
+            session.focused_seconds,
+            session.started_at,
+            session.ended_at,
+            "manual_finish",
+            eligible as i64,
+            qualification,
+        ],
+    )?;
+
+    if inserted == 0 {
+        // A concurrent completion won the race — defer to its result without
+        // touching the timer.
+        let session = tx
+            .query_row(
+                &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
+                params![input.active_session_id],
+                session_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| CommandError::internal("session disappeared mid-query"))?;
+        let timer = get_timer(&tx)?;
+        let stats = all_time_statistics(&tx)?;
+        return Ok(FinishTimerResult {
+            timer,
+            session,
+            statistics: stats,
+            newly_finished: false,
+            statistics_eligible: eligible,
+            qualification_reason: qualification.to_owned(),
+        });
+    }
+
+    // 5) Manual finish ends in the current mode's idle state with full duration.
+    timer.state = TimerState::Idle;
+    timer.active_session_id = None;
+    timer.selected_task_id = None;
+    timer.task_title_snapshot = None;
+    timer.project_snapshot = None;
+    timer.tag_id = None;
+    timer.tag_name_snapshot = None;
+    timer.remaining_seconds = timer.duration_seconds;
+    timer.target_end_at = None;
+    timer.paused_at = None;
+    timer.revision += 1;
+    timer.updated_at = now;
+    write_timer(&tx, &timer)?;
+
+    let stats = all_time_statistics(&tx)?;
+    tx.commit()?;
+
+    Ok(FinishTimerResult {
+        timer,
+        session,
+        statistics: stats,
+        newly_finished: inserted > 0,
+        statistics_eligible: eligible,
+        qualification_reason: qualification.to_owned(),
+    })
+}
+
 pub fn persist_running_as_paused(conn: &Connection) -> Result<(), CommandError> {
     let mut timer = get_timer(conn)?;
     if timer.state != TimerState::Running {
@@ -1241,6 +1466,11 @@ pub fn list_sessions_query(
     let mut sql = String::from("SELECT ");
     sql.push_str(SESSION_COLUMNS);
     sql.push_str(" FROM sessions WHERE 1=1");
+    // Default scope is `activity`: hidden records (too_short, abandoned,
+    // breaks) can only be read explicitly with `all` (exports/tests).
+    if query.scope.unwrap_or_default() != crate::models::SessionScope::All {
+        sql.push_str(" AND statistics_eligible = 1");
+    }
     let mut bindings: Vec<i64> = Vec::new();
     if let Some(from) = query.from {
         sql.push_str(" AND started_at >= ?");
@@ -1425,7 +1655,8 @@ fn compute_streak(by_day: &[DayStat]) -> i64 {
 pub fn all_time_statistics(conn: &Connection) -> Result<Statistics, CommandError> {
     let (count, seconds) = conn.query_row(
         "SELECT COUNT(*), COALESCE(SUM(focused_seconds), 0)
-         FROM sessions WHERE mode = 'focus' AND status = 'completed'",
+         FROM sessions
+         WHERE mode = 'focus' AND status = 'completed' AND statistics_eligible = 1",
         [],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     )?;
@@ -1433,7 +1664,7 @@ pub fn all_time_statistics(conn: &Connection) -> Result<Statistics, CommandError
     let mut stmt = conn.prepare(
         "SELECT project_snapshot, COUNT(*) AS sessions, COALESCE(SUM(focused_seconds), 0) AS focus_seconds
          FROM sessions
-         WHERE mode = 'focus' AND status = 'completed'
+         WHERE mode = 'focus' AND status = 'completed' AND statistics_eligible = 1
          GROUP BY project_snapshot
          ORDER BY focus_seconds DESC, project_snapshot ASC",
     )?;
@@ -1466,14 +1697,25 @@ pub fn all_time_statistics(conn: &Connection) -> Result<Statistics, CommandError
 
 /// Builds a lossless JSON backup bundle: settings, all tasks, all sessions.
 pub fn export_data(conn: &Connection) -> Result<ExportBundle, CommandError> {
+    // Backups are complete by definition: they use scope=all so hidden
+    // records (too_short / abandoned / breaks) survive the round trip.
     Ok(ExportBundle {
         app: EXPORT_APP_NAME.to_owned(),
         schema_version: EXPORT_SCHEMA_VERSION,
         exported_at: now_millis(),
         settings: get_settings(conn)?,
         tasks: list_tasks(conn)?,
-        sessions: list_sessions(conn, i64::MAX)?,
+        sessions: list_all_sessions(conn)?,
     })
+}
+
+/// Full listing without the activity-visibility filter (exports/backups).
+fn list_all_sessions(conn: &Connection) -> Result<Vec<TimerSession>, CommandError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions ORDER BY started_at ASC, rowid ASC"
+    ))?;
+    let rows = stmt.query_map([], session_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// Validates a parsed backup bundle before it touches the database.
@@ -1621,10 +1863,13 @@ fn csv_field(value: &str) -> String {
 /// as epoch milliseconds (lossless, convertible in any spreadsheet) because the
 /// app stores them that way and avoids a date-formatting dependency.
 pub fn export_sessions_csv(conn: &Connection) -> Result<String, CommandError> {
-    let sessions = list_sessions(conn, i64::MAX)?;
+    // CSV is a complete-record export: hidden (too_short / abandoned) rows are
+    // included on purpose and flagged by their qualification columns.
+    let sessions = list_all_sessions(conn)?;
     let mut out = String::from(
-        "id,taskId,taskTitle,project,mode,status,plannedSeconds,focusedSeconds,\
-         plannedMinutes,focusedMinutes,startedAt,endedAt\n",
+        "id,taskId,taskTitle,project,tagName,mode,status,plannedSeconds,focusedSeconds,\
+         plannedMinutes,focusedMinutes,startedAt,endedAt,finishReason,statisticsEligible,\
+         qualificationReason\n",
     );
     for session in &sessions {
         let row = [
@@ -1632,6 +1877,7 @@ pub fn export_sessions_csv(conn: &Connection) -> Result<String, CommandError> {
             csv_field(session.task_id.as_deref().unwrap_or("")),
             csv_field(&session.task_title_snapshot),
             csv_field(&session.project_snapshot),
+            csv_field(session.tag_name_snapshot.as_deref().unwrap_or("")),
             session.mode.as_str().to_owned(),
             session.status.as_str().to_owned(),
             session.planned_seconds.to_string(),
@@ -1640,6 +1886,15 @@ pub fn export_sessions_csv(conn: &Connection) -> Result<String, CommandError> {
             (session.focused_seconds / 60).to_string(),
             session.started_at.to_string(),
             session.ended_at.to_string(),
+            session.finish_reason.clone().unwrap_or_else(|| "legacy".to_owned()),
+            session
+                .statistics_eligible
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "false".to_owned()),
+            session
+                .qualification_reason
+                .clone()
+                .unwrap_or_else(|| "legacy".to_owned()),
         ];
         out.push_str(&row.join(","));
         out.push('\n');
@@ -2400,17 +2655,17 @@ mod tests {
         seed_completed_focus(&conn, "s2", 200, 1500, "A");
         seed_completed_focus(&conn, "s3", 300, 1500, "A");
 
-        let all = list_sessions_query(&conn, &SessionQuery { limit: None, from: None, to: None })
+        let all = list_sessions_query(&conn, &SessionQuery { limit: None, from: None, to: None, scope: None })
             .expect("query");
         assert_eq!(all.len(), 3);
 
-        let limited = list_sessions_query(&conn, &SessionQuery { limit: Some(2), from: None, to: None })
+        let limited = list_sessions_query(&conn, &SessionQuery { limit: Some(2), from: None, to: None, scope: None })
             .expect("query");
         assert_eq!(limited.len(), 2);
         // Most recent first.
         assert_eq!(limited[0].id, "s3");
 
-        let ranged = list_sessions_query(&conn, &SessionQuery { limit: None, from: Some(150), to: Some(250) })
+        let ranged = list_sessions_query(&conn, &SessionQuery { limit: None, from: Some(150), to: Some(250), scope: None })
             .expect("query");
         assert_eq!(ranged.len(), 1);
         assert_eq!(ranged[0].id, "s2");
@@ -2568,9 +2823,18 @@ mod tests {
         assert_eq!(reset.revision, 2);
         assert_eq!(reset.remaining_seconds, 1500);
 
-        let sessions = list_sessions(&conn, 10).expect("sessions");
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].status, SessionStatus::Abandoned);
+        // v1.1 ruling: reset records are internal — hidden from the activity
+        // view, preserved in full exports.
+        let activity = list_sessions(&conn, 10).expect("activity");
+        assert!(activity.is_empty(), "reset record must not appear in the activity view");
+
+        let everything = list_sessions_query(&conn, &SessionQuery {
+            limit: None, from: None, to: None, scope: Some(crate::models::SessionScope::All),
+        }).expect("all");
+        assert_eq!(everything.len(), 1);
+        assert_eq!(everything[0].status, SessionStatus::Abandoned);
+        assert_eq!(everything[0].finish_reason.as_deref(), Some("reset"));
+        assert_eq!(everything[0].statistics_eligible, Some(false));
     }
 
     #[test]
@@ -2636,10 +2900,14 @@ mod tests {
     #[test]
     fn complete_timer_creates_completed_session_and_done_timer() {
         let mut conn = db::open_in_memory().expect("db");
-        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
             expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
         }).expect("start");
         let session_id = timer.active_session_id.clone().unwrap();
+
+        // Natural expiry: push the deadline into the past.
+        timer.target_end_at = Some(now_millis() - 500);
+        write_timer(&conn, &timer).expect("write");
 
         let result = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
             expected_revision: 1,
@@ -2659,10 +2927,14 @@ mod tests {
     #[test]
     fn complete_timer_is_idempotent() {
         let mut conn = db::open_in_memory().expect("db");
-        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
             expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
         }).expect("start");
         let session_id = timer.active_session_id.clone().unwrap();
+
+        // Natural expiry: push the deadline into the past.
+        timer.target_end_at = Some(now_millis() - 500);
+        write_timer(&conn, &timer).expect("write");
 
         let first = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
             expected_revision: 1, active_session_id: session_id.clone(), recovery: None,
@@ -2679,9 +2951,14 @@ mod tests {
         assert_eq!(second.session.id, first.session.id);
         assert_eq!(second.session.status, SessionStatus::Completed);
 
-        // Only one session in the DB.
-        let sessions = list_sessions(&conn, 10).expect("sessions");
+        // Only one session in the DB — a legitimate natural completion of the
+        // full duration, eligible and visible in the activity view.
+        let sessions = list_sessions_query(&conn, &SessionQuery {
+            limit: None, from: None, to: None, scope: Some(crate::models::SessionScope::All),
+        }).expect("sessions");
         assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].statistics_eligible, Some(true));
+        assert_eq!(sessions[0].finish_reason.as_deref(), Some("elapsed"));
     }
 
     #[test]
@@ -2789,12 +3066,301 @@ mod tests {
         assert_eq!(resumed.state, TimerState::Running);
         assert_eq!(resumed.revision, 3);
 
+        // Natural expiry so the completion is legal (v1.1 deadline guard).
+        let mut expired = resumed.clone();
+        expired.target_end_at = Some(now_millis() - 500);
+        write_timer(&conn, &expired).expect("write");
+
         let result = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
             expected_revision: 3, active_session_id: session_id, recovery: None,
         }).expect("complete");
         assert!(result.newly_completed);
         assert_eq!(result.session.status, SessionStatus::Completed);
         assert_eq!(result.session.mode, TimerMode::Focus);
+    }
+
+    // ─── finish_timer + qualification + scope (v1.1, review #4/#5/#6) ─────────
+
+    fn count_rows(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .expect("count")
+    }
+
+    #[test]
+    fn finish_under_30s_is_hidden_and_not_counted() {
+        let mut conn = db::open_in_memory().expect("db");
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        // Simulate 29 seconds focused (ceiling keeps 1471s remaining).
+        let mut running = timer.clone();
+        running.target_end_at = Some(now_millis() + 1471 * 1000);
+        write_timer(&conn, &running).expect("write");
+
+        let result = finish_timer(&mut conn, &FinishTimerInput {
+            expected_revision: running.revision, active_session_id: session_id,
+        }).expect("finish");
+
+        assert!(result.newly_finished);
+        assert!(!result.statistics_eligible, "29s focus must not be counted");
+        assert_eq!(result.qualification_reason, "too_short");
+        assert_eq!(result.timer.state, TimerState::Idle);
+        assert_eq!(result.timer.remaining_seconds, 1500);
+
+        // Hidden from the activity view...
+        let activity = list_sessions(&conn, 50).expect("activity");
+        assert!(activity.is_empty(), "too_short must not appear in the activity view");
+        // ...but preserved in the complete export (scope = all).
+        let everything = list_sessions_query(&conn, &SessionQuery {
+            limit: None, from: None, to: None, scope: Some(crate::models::SessionScope::All),
+        }).expect("all");
+        assert_eq!(everything.len(), 1);
+        assert_eq!(everything[0].finish_reason.as_deref(), Some("manual_finish"));
+
+        let stats = all_time_statistics(&conn).expect("stats");
+        assert_eq!(stats.focus_session_count, 0);
+    }
+
+    #[test]
+    fn finish_at_30s_is_counted_and_visible() {
+        let mut conn = db::open_in_memory().expect("db");
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        let mut running = timer.clone();
+        running.target_end_at = Some(now_millis() + 1470 * 1000);
+        write_timer(&conn, &running).expect("write");
+
+        let result = finish_timer(&mut conn, &FinishTimerInput {
+            expected_revision: running.revision, active_session_id: session_id,
+        }).expect("finish");
+
+        assert!(result.statistics_eligible, "30s focus counts (29 excluded, 30 counted)");
+        assert_eq!(result.qualification_reason, "qualified");
+
+        let activity = list_sessions(&conn, 50).expect("activity");
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].finish_reason.as_deref(), Some("manual_finish"));
+
+        let stats = all_time_statistics(&conn).expect("stats");
+        assert_eq!(stats.focus_session_count, 1);
+        assert!(stats.focus_seconds >= 30);
+    }
+
+    #[test]
+    fn finish_from_paused_uses_persisted_remaining() {
+        let mut conn = db::open_in_memory().expect("db");
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+
+        // Paused with 1470s remaining (30s focused, held while paused).
+        timer.state = TimerState::Paused;
+        timer.remaining_seconds = 1470;
+        timer.target_end_at = None;
+        timer.paused_at = Some(now_millis());
+        timer.revision = 1;
+        write_timer(&conn, &timer).expect("write");
+
+        let result = finish_timer(&mut conn, &FinishTimerInput {
+            expected_revision: 1, active_session_id: timer.active_session_id.clone().unwrap(),
+        }).expect("finish");
+
+        assert!(result.statistics_eligible, "paused focus uses persisted remaining");
+        let activity = list_sessions(&conn, 50).expect("activity");
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].focused_seconds, 30);
+    }
+
+    #[test]
+    fn finish_timer_replay_with_stale_revision_returns_existing() {
+        let mut conn = db::open_in_memory().expect("db");
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        let first = finish_timer(&mut conn, &FinishTimerInput {
+            expected_revision: 1, active_session_id: session_id.clone(),
+        }).expect("first finish");
+        assert!(first.newly_finished);
+
+        // Replayed command with the now-stale revision: idempotency must win
+        // over the revision check (review #5).
+        let replay = finish_timer(&mut conn, &FinishTimerInput {
+            expected_revision: 1, active_session_id: session_id,
+        }).expect("replay");
+
+        assert!(!replay.newly_finished);
+        assert_eq!(replay.session.id, first.session.id);
+        assert_eq!(count_rows(&conn, "sessions"), 1);
+    }
+
+    #[test]
+    fn complete_then_finish_race_yields_single_session() {
+        let mut conn = db::open_in_memory().expect("db");
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        // Natural expiry so complete_timer may legally fire first.
+        timer.target_end_at = Some(now_millis() - 500);
+        write_timer(&conn, &timer).expect("write");
+
+        let completed = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 1, active_session_id: session_id.clone(), recovery: None,
+        }).expect("complete wins");
+        assert!(completed.newly_completed);
+
+        // finish_timer arrives afterwards — idempotent, no second session.
+        let finished = finish_timer(&mut conn, &FinishTimerInput {
+            expected_revision: 1, active_session_id: session_id,
+        }).expect("finish after complete");
+        assert!(!finished.newly_finished);
+
+        assert_eq!(count_rows(&conn, "sessions"), 1);
+    }
+
+    #[test]
+    fn finish_then_complete_race_yields_single_session() {
+        let mut conn = db::open_in_memory().expect("db");
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+
+        // Focus for 30s, then finish wins the race.
+        timer.target_end_at = Some(now_millis() + 1470 * 1000);
+        write_timer(&conn, &timer).expect("write");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        let finished = finish_timer(&mut conn, &FinishTimerInput {
+            expected_revision: 1, active_session_id: session_id.clone(),
+        }).expect("finish wins");
+        assert!(finished.newly_finished);
+
+        // complete_timer arrives afterwards — idempotent, no second session,
+        // and the timer stays idle (the manual-finish terminal state).
+        let completed = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 2, active_session_id: session_id, recovery: None,
+        }).expect("complete after finish");
+        assert!(!completed.newly_completed);
+
+        assert_eq!(count_rows(&conn, "sessions"), 1);
+        assert_eq!(finished.timer.state, TimerState::Idle);
+    }
+
+    #[test]
+    fn complete_timer_before_deadline_is_rejected() {
+        let mut conn = db::open_in_memory().expect("db");
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        // 20 minutes still on the clock — an early call must be rejected.
+        let result = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 1, active_session_id: session_id.clone(), recovery: None,
+        });
+
+        assert!(matches!(result, Err(ref e) if e.code == crate::error::ErrorCode::Conflict));
+        assert!(
+            result.err().unwrap().message.contains("finish_timer"),
+            "the error must point at the early-exit path"
+        );
+
+        // No session written, timer untouched.
+        let everything = list_sessions_query(&conn, &SessionQuery {
+            limit: None, from: None, to: None, scope: Some(crate::models::SessionScope::All),
+        }).expect("all");
+        assert!(everything.is_empty(), "rejected completion must not write a session");
+
+        let unchanged = get_timer(&conn).expect("timer");
+        assert_eq!(unchanged.state, TimerState::Running);
+        assert_eq!(unchanged.revision, 1);
+        assert!(unchanged.target_end_at.is_some());
+    }
+
+    #[test]
+    fn complete_timer_within_scheduling_tolerance_is_allowed() {
+        let mut conn = db::open_in_memory().expect("db");
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        // 200ms remaining — inside the 250ms scheduling tolerance.
+        timer.target_end_at = Some(now_millis() + 200);
+        timer.revision = 1;
+        write_timer(&conn, &timer).expect("write");
+
+        let result = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 1, active_session_id: session_id, recovery: None,
+        }).expect("within tolerance completes naturally");
+
+        assert_eq!(result.timer.state, TimerState::Done);
+        assert!(result.newly_completed);
+    }
+
+    #[test]
+    fn list_sessions_query_hides_ineligible_by_default() {
+        let conn = db::open_in_memory().expect("db");
+        seed_completed_focus(&conn, "s-eligible", 100, 1500, "A");
+        // Hidden rows written directly: too_short, abandoned focus, break.
+        let (fallback_id, fallback_name) = fallback_tag(&conn).expect("fallback");
+        for (id, mode, status, focused, qualification) in [
+            ("s-short", "focus", "completed", 10i64, "too_short"),
+            ("s-abandoned", "focus", "abandoned", 600i64, "abandoned"),
+            ("s-break", "short", "completed", 300i64, "non_focus"),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                       tag_name_snapshot, mode, status, planned_seconds, focused_seconds,
+                       started_at, ended_at, finish_reason, statistics_eligible, qualification_reason)
+                 VALUES (?1, NULL, 't', 'P', ?2, ?3, ?4, ?5, 1500, ?6, 1, 2, 'legacy', 0, ?7)",
+                params![id, fallback_id, fallback_name, mode, status, focused, qualification],
+            )
+            .expect("hidden session");
+        }
+
+        let default_view = list_sessions_query(&conn, &SessionQuery {
+            limit: None, from: None, to: None, scope: None,
+        }).expect("default");
+        assert_eq!(default_view.len(), 1, "activity default hides ineligible rows");
+        assert_eq!(default_view[0].id, "s-eligible");
+
+        let everything = list_sessions_query(&conn, &SessionQuery {
+            limit: None, from: None, to: None, scope: Some(crate::models::SessionScope::All),
+        }).expect("all");
+        assert_eq!(everything.len(), 4, "scope=all reads every record");
+    }
+
+    #[test]
+    fn export_backup_and_csv_preserve_hidden_sessions() {
+        let conn = db::open_in_memory().expect("db");
+        seed_completed_focus(&conn, "s-eligible", 100, 1500, "A");
+        let (fallback_id, fallback_name) = fallback_tag(&conn).expect("fallback");
+        conn.execute(
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                   tag_name_snapshot, mode, status, planned_seconds, focused_seconds,
+                   started_at, ended_at, finish_reason, statistics_eligible, qualification_reason)
+             VALUES ('s-reset', NULL, 't', 'P', ?1, ?2, 'focus', 'abandoned', 1500, 25, 1, 2,
+                     'reset', 0, 'too_short')",
+            params![fallback_id, fallback_name],
+        )
+        .expect("hidden reset record");
+
+        let bundle = export_data(&conn).expect("export");
+        assert_eq!(bundle.sessions.len(), 2, "backup must include hidden records");
+
+        let csv = export_sessions_csv(&conn).expect("csv");
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 records (hidden record included)");
+        assert!(csv.contains("reset"), "reset record must be in the CSV");
     }
 
 
@@ -2811,10 +3377,13 @@ mod tests {
             project: "Archive".to_owned(),
         }).expect("insert");
 
-        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
             expected_revision: 0, mode: TimerMode::Focus, selected_task_id: Some(task.id.clone()),
         }).expect("start");
         let session_id = timer.active_session_id.clone().unwrap();
+        // Natural expiry so the completion is legal (v1.1 deadline guard).
+        timer.target_end_at = Some(now_millis() - 500);
+        write_timer(&conn, &timer).expect("write");
         complete_timer(&mut conn, &settings(), &CompleteTimerInput {
             expected_revision: 1, active_session_id: session_id, recovery: None,
         }).expect("complete");
@@ -2836,7 +3405,15 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].title, "Backup me");
         assert_eq!(restored[0].project, "Archive");
-        assert_eq!(list_sessions(&conn, 10).expect("sessions").len(), 1);
+
+        // The restored session is a legitimate natural completion (full
+        // duration) and survives the round trip.
+        let sessions = list_sessions_query(&conn, &SessionQuery {
+            limit: None, from: None, to: None, scope: Some(crate::models::SessionScope::All),
+        }).expect("sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].statistics_eligible, Some(true));
+        assert_eq!(sessions[0].finish_reason.as_deref(), Some("elapsed"));
     }
 
     #[test]

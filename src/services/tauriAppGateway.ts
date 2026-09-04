@@ -11,6 +11,8 @@ import type {
   CreateTaskInput,
   DeleteTagResult,
   ExportSummary,
+  FinishTimerInput,
+  FinishTimerResult,
   ImportPreview,
   ImportSummary,
   ReorderTagInput,
@@ -39,6 +41,7 @@ export class TauriAppGateway implements AppGateway {
   resetTimer(input: TimerRevisionInput) { return invoke<TimerSnapshot>('reset_timer', { input }) }
   switchTimerMode(input: SwitchTimerModeInput) { return invoke<TimerSnapshot>('switch_timer_mode', { input }) }
   completeTimer(input: CompleteTimerInput) { return invoke<CompleteTimerResult>('complete_timer', { input }) }
+  finishTimer(input: FinishTimerInput) { return invoke<FinishTimerResult>('finish_timer', { input }) }
   createTask(input: CreateTaskInput) { return invoke<Task>('create_task', { input }) }
   updateTask(input: UpdateTaskInput) { return invoke<Task>('update_task', { input }) }
   deleteTask(id: string) { return invoke<void>('delete_task', { id }) }

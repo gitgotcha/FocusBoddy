@@ -9,6 +9,8 @@ import type {
   CreateTaskInput,
   DeleteTagResult,
   ExportSummary,
+  FinishTimerInput,
+  FinishTimerResult,
   ImportPreview,
   ImportSummary,
   ReorderTagInput,
@@ -260,6 +262,11 @@ export class FakeAppGateway implements AppGateway {
       focusedSeconds: focusedSeconds > 0 ? focusedSeconds : this.timer.durationSeconds,
       startedAt: this.timer.startedAt ?? now,
       endedAt: now,
+      finishReason: 'elapsed',
+      statisticsEligible: this.timer.mode === 'focus' && focusedSeconds >= 30,
+      qualificationReason: this.timer.mode !== 'focus'
+        ? 'non_focus'
+        : focusedSeconds >= 30 ? 'qualified' : 'too_short',
     }
     this.sessions = [...this.sessions, session]
     this.timer = {
@@ -429,12 +436,73 @@ export class FakeAppGateway implements AppGateway {
 
   async listSessions(query: SessionQuery): Promise<TimerSession[]> {
     this.takeFailure()
+    const scope = query.scope ?? 'activity'
     let result = this.sessions
+    if (scope !== 'all') result = result.filter((s) => s.statisticsEligible === true)
     if (query.from !== undefined) result = result.filter((s) => s.startedAt >= query.from!)
     if (query.to !== undefined) result = result.filter((s) => s.startedAt <= query.to!)
     result = result.slice().sort((a, b) => b.startedAt - a.startedAt)
     if (query.limit !== undefined) result = result.slice(0, query.limit)
     return result
+  }
+
+  /** v1.1 manual finish — records actual focused time; timer returns to idle. */
+  async finishTimer(input: FinishTimerInput): Promise<FinishTimerResult> {
+    this.takeFailure()
+    const now = Date.now()
+    const existing = this.sessions.find(s => s.id === input.activeSessionId)
+    if (existing) {
+      // Idempotent replay — no second session, no second effect.
+      return {
+        timer: this.timer,
+        session: existing,
+        statistics: this.computeStatistics({ from: 0, to: now, days: [] }),
+        newlyFinished: false,
+        statisticsEligible: existing.statisticsEligible ?? false,
+        qualificationReason: existing.qualificationReason ?? 'legacy',
+      }
+    }
+    if (this.timer.state !== 'running' && this.timer.state !== 'paused') {
+      throw new Error('CONFLICT: finish_timer requires a running or paused timer')
+    }
+    const focused = Math.max(
+      0,
+      Math.round((now - (this.timer.startedAt ?? now)) / 1000),
+    )
+    const eligible = this.timer.mode === 'focus' && focused >= 30
+    const session: TimerSession = {
+      id: input.activeSessionId,
+      taskId: this.timer.selectedTaskId,
+      taskTitleSnapshot: this.timer.taskTitleSnapshot ?? '未指定任务',
+      projectSnapshot: this.timer.projectSnapshot ?? '通用',
+      tagId: this.timer.tagId ?? 'system-other',
+      tagNameSnapshot: this.timer.tagNameSnapshot ?? '其他',
+      mode: this.timer.mode,
+      status: 'completed',
+      plannedSeconds: this.timer.durationSeconds,
+      focusedSeconds: focused,
+      startedAt: this.timer.startedAt ?? now,
+      endedAt: now,
+      finishReason: 'manual_finish',
+      statisticsEligible: eligible,
+      qualificationReason: this.timer.mode !== 'focus'
+        ? 'non_focus'
+        : eligible ? 'qualified' : 'too_short',
+    }
+    this.sessions = [...this.sessions, session]
+    this.timer = {
+      ...idleTimerForMode(this.timer.mode, this.settings),
+      revision: this.timer.revision + 1,
+      updatedAt: now,
+    }
+    return {
+      timer: this.timer,
+      session,
+      statistics: this.computeStatistics({ from: 0, to: now, days: [] }),
+      newlyFinished: true,
+      statisticsEligible: eligible,
+      qualificationReason: session.qualificationReason ?? 'legacy',
+    }
   }
 
   async getStatistics(query: StatisticsQuery): Promise<Statistics> {

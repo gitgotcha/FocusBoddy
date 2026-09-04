@@ -153,6 +153,7 @@ pub fn run() {
             commands::reset_timer,
             commands::switch_timer_mode,
             commands::complete_timer,
+            commands::finish_timer,
             commands::list_sessions,
             commands::get_statistics,
             commands::pick_export_path,
