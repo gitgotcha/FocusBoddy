@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { AppSettings, ImportPreview, Statistics, Task, TaskPriority, TimerMode, TimerSession, TimerSnapshot } from "./domain/models";
+import type { AppSettings, CreateTaskInput, ImportPreview, Statistics, Tag, Task, TaskPriority, TimerMode, TimerSession, TimerSnapshot } from "./domain/models";
 import { DEFAULT_SETTINGS, durationSecondsForMode } from "./domain/defaults";
 import { weekBoundaries, weekRange } from "./domain/statistics";
 import { formatTrayIndicator } from "./domain/tray";
@@ -209,6 +209,7 @@ export default function App() {
   const gateway = useAppGateway();
   const [nav, setNav]     = useState<NavSection>("timer");
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
   const [logs, setLogs]   = useState<SessionLog[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [weekStats, setWeekStats] = useState<Statistics | null>(null);
@@ -237,6 +238,7 @@ export default function App() {
     gateway.bootstrap()
       .then(payload => {
         setTasks(payload.tasks);
+        setTags(payload.tags);
         setLogs(payload.sessions.map(sessionToLog));
         setSettings(payload.settings);
         applyTimer(payload.timer);
@@ -417,6 +419,7 @@ export default function App() {
       .then(async payload => {
         if (cancelled) return;
         setTasks(payload.tasks);
+        setTags(payload.tags);
         setLogs(payload.sessions.map(sessionToLog));
         setSettings(payload.settings);
         applyTimer(payload.timer);
@@ -437,11 +440,30 @@ export default function App() {
     refreshStats(); // dailyGoal is baked into the statistics payload
   }, [gateway, applyTimer, refreshStats]);
 
-  const createTask = useCallback(async (title: string) => {
-    const task = await gateway.createTask({
-      title, pomodoroTarget: 1, priority: "med", project: "通用",
-    });
+  const createTask = useCallback(async (input: CreateTaskInput) => {
+    const task = await gateway.createTask(input);
     setTasks(p => [...p, task]);
+  }, [gateway]);
+
+  // ─── Tag operations (v1.1) ─────────────────────────────────────────────────
+  const createTagOp = useCallback(async (name: string) => {
+    const tag = await gateway.createTag({ name });
+    setTags(p => [...p, tag]);
+  }, [gateway]);
+
+  const renameTagOp = useCallback(async (id: string, name: string) => {
+    const tag = await gateway.updateTag({ id, name });
+    setTags(p => p.map(t => (t.id === tag.id ? tag : t)));
+  }, [gateway]);
+
+  const reorderTagOp = useCallback(async (id: string, direction: number) => {
+    setTags(await gateway.reorderTag({ id, direction }));
+  }, [gateway]);
+
+  const removeTag = useCallback(async (id: string) => {
+    const result = await gateway.deleteTag(id);
+    setTags(result.tags);
+    setTasks(result.tasks);
   }, [gateway]);
 
   const toggleTask = useCallback(async (id: string) => {
@@ -484,10 +506,18 @@ export default function App() {
       case "tasks":    return (
         <TasksPanel
           tasks={tasks}
+          tags={tags}
           onCreateTask={createTask}
           onToggleTask={toggleTask}
           onDeleteTask={deleteTask}
           onCyclePriority={cyclePriority}
+          tagOps={{
+            createTag: createTagOp,
+            renameTag: renameTagOp,
+            reorderTag: reorderTagOp,
+            previewDeleteTag: id => gateway.previewDeleteTag(id),
+            deleteTag: removeTag,
+          }}
         />
       );
       case "stats":    return <StatsPage  logs={logs} sessionCount={focusSessionCount} stats={weekStats} />;

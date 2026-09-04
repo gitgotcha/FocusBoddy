@@ -392,6 +392,9 @@ pub struct CreateTaskInput {
     pub pomodoro_target: i64,
     pub priority: TaskPriority,
     pub project: String,
+    /// Primary tag; defaults to the fallback tag for callers predating v1.1.
+    #[serde(default = "default_task_tag_id")]
+    pub tag_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -212,9 +212,10 @@ pub fn insert_task(conn: &Connection, input: &CreateTaskInput) -> Result<Task, C
     let sort_order: i64 = conn
         .query_row("SELECT COALESCE(MAX(sort_order) + 1, 0) FROM tasks", [], |row| row.get(0))
         .unwrap_or(0);
-    // F4 will let the user pick the tag; until then every new task lands on
-    // the fallback tag.
+    // F4 lets the user pick the tag; empty/legacy callers land on the
+    // fallback tag.
     let (fallback_id, _fallback_name) = fallback_tag(conn)?;
+    let tag_id = if input.tag_id.is_empty() { fallback_id } else { input.tag_id.clone() };
 
     let task = Task {
         id: Uuid::new_v4().to_string(),
@@ -223,7 +224,7 @@ pub fn insert_task(conn: &Connection, input: &CreateTaskInput) -> Result<Task, C
         pomodoro_target: input.pomodoro_target,
         priority: input.priority,
         project: clean_project(&input.project),
-        tag_id: fallback_id,
+        tag_id,
         sort_order,
         created_at: now,
         updated_at: now,
@@ -2071,6 +2072,7 @@ mod tests {
             pomodoro_target: 4,
             priority: TaskPriority::High,
             project: "Abyssal".to_owned(),
+            tag_id: String::new(),
         }
     }
 
@@ -2490,6 +2492,7 @@ mod tests {
         for i in 0..2 {
             insert_task(&conn, &CreateTaskInput {
                 title: format!("任务{i}"),
+            tag_id: String::new(),
                 pomodoro_target: 1,
                 priority: TaskPriority::Med,
                 project: "通用".to_owned(),
@@ -2515,6 +2518,7 @@ mod tests {
         // A task on the tag + a session whose snapshot froze that tag name.
         insert_task(&conn, &CreateTaskInput {
             title: "会转移的任务".to_owned(),
+            tag_id: String::new(),
             pomodoro_target: 1,
             priority: TaskPriority::Med,
             project: "通用".to_owned(),
@@ -2589,6 +2593,7 @@ mod tests {
 
         insert_task(&conn, &CreateTaskInput {
             title: "带标签的任务".to_owned(),
+            tag_id: String::new(),
             pomodoro_target: 1,
             priority: TaskPriority::Med,
             project: "通用".to_owned(),
@@ -2839,6 +2844,7 @@ mod tests {
         let mut conn = db::open_in_memory().expect("db");
         let task = insert_task(&conn, &CreateTaskInput {
             title: "Write tests".to_owned(),
+            tag_id: String::new(),
             pomodoro_target: 3,
             priority: TaskPriority::High,
             project: "Backend".to_owned(),
@@ -3629,6 +3635,7 @@ mod tests {
 
         let task = insert_task(&conn, &CreateTaskInput {
             title: "Backup me".to_owned(),
+            tag_id: String::new(),
             pomodoro_target: 6,
             priority: TaskPriority::Low,
             project: "Archive".to_owned(),
@@ -3711,6 +3718,7 @@ mod tests {
         // Seed real, in-use data: a task and a completed focus session.
         let task = insert_task(&conn, &CreateTaskInput {
             title: "Real task".to_owned(),
+            tag_id: String::new(),
             pomodoro_target: 2,
             priority: TaskPriority::High,
             project: "Real".to_owned(),

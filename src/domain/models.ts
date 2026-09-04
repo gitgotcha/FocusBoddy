@@ -155,6 +155,8 @@ export interface CreateTaskInput {
   pomodoroTarget: number
   priority: TaskPriority
   project: string
+  /** Defaults to the fallback tag when omitted. */
+  tagId?: string
 }
 
 export interface UpdateTaskInput extends Partial<CreateTaskInput> {
