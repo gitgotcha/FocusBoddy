@@ -355,6 +355,10 @@ export class FakeAppGateway implements AppGateway {
     return () => undefined
   }
 
+  subscribeGlobalShortcutConflict(_cb: (shortcut: string) => void): () => void {
+    return () => undefined
+  }
+
   // --- Autostart (in-memory stub for tests) ---
 
   /** Mirrors the OS registry state for component tests. */

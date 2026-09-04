@@ -1,12 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }))
+const { invokeMock, listenMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  listenMock: vi.fn(),
+}))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
+vi.mock('@tauri-apps/api/event', () => ({ listen: listenMock }))
 
 import { TauriAppGateway } from '../tauriAppGateway'
 
 describe('TauriAppGateway', () => {
-  beforeEach(() => invokeMock.mockReset())
+  beforeEach(() => {
+    invokeMock.mockReset()
+    listenMock.mockReset()
+    listenMock.mockResolvedValue(vi.fn())
+  })
 
   it('maps every timer action to its Rust command', async () => {
     invokeMock.mockResolvedValue({})
@@ -86,5 +94,18 @@ describe('TauriAppGateway', () => {
     ])
     expect(invokeMock).toHaveBeenCalledWith('export_backup_to', { path: 'backup.json' })
     expect(invokeMock).toHaveBeenCalledWith('import_backup_from', { path: 'import.json' })
+  })
+
+  it('subscribes to the global-shortcut conflict event', () => {
+    const gateway = new TauriAppGateway()
+    const handler = vi.fn()
+    gateway.subscribeGlobalShortcutConflict(handler)
+
+    expect(listenMock).toHaveBeenCalledWith('global-shortcut-conflict', expect.any(Function))
+
+    // Simulate the Rust event and confirm the payload reaches the callback.
+    const [, listener] = listenMock.mock.calls[0]
+    listener({ payload: { shortcut: 'CommandOrControl+Alt+Space' } })
+    expect(handler).toHaveBeenCalledWith('CommandOrControl+Alt+Space')
   })
 })

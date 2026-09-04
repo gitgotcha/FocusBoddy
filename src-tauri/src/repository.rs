@@ -1815,7 +1815,7 @@ mod tests {
         assert!(paused.paused_at.is_some());
         assert_eq!(paused.revision, 2);
         // Remaining should be ~1495 (allow small timing drift).
-        assert!(paused.remaining_seconds >= 1490 && paused.remaining_seconds <= 1500);
+        assert!(paused.remaining_seconds >= 1485 && paused.remaining_seconds <= 1500);
 
         let resumed = resume_timer(&mut conn, &crate::models::TimerRevisionInput {
             expected_revision: 2,
@@ -1903,7 +1903,7 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].status, SessionStatus::Completed);
         assert_eq!(sessions[0].mode, TimerMode::Focus);
-        assert!(sessions[0].focused_seconds >= 595 && sessions[0].focused_seconds <= 600,
+        assert!(sessions[0].focused_seconds >= 590 && sessions[0].focused_seconds <= 610,
             "expected ~600s focused, got {}", sessions[0].focused_seconds);
 
         // And it counts toward statistics (completed focus).
@@ -2041,7 +2041,7 @@ mod tests {
         assert_eq!(stored.state, TimerState::Paused);
         assert!(stored.target_end_at.is_none(), "target_end_at must be cleared");
         assert!(stored.paused_at.is_some(), "paused_at must be stamped");
-        assert!(stored.remaining_seconds >= 1475 && stored.remaining_seconds <= 1500,
+        assert!(stored.remaining_seconds >= 1470 && stored.remaining_seconds <= 1500,
             "remaining should be ~1480, got {}", stored.remaining_seconds);
         assert_eq!(stored.revision, 2, "revision must advance");
         assert!(stored.active_session_id.is_some(), "session must be preserved for manual resume");

@@ -17,7 +17,7 @@
 | R1-02 | Round 1 | P1 | 全局快捷键被其它程序占用时，`build()` 返回错误导致启动崩溃（`.run().expect()` panic） | ⏳ 待 Round 3 | — |
 | R1-03 | Round 4 | P2 | 缺少“降低动态效果”开关；视频在失焦/最小化时未降开销 | ⏳ 待 Round 4 | — |
 | R1-04 | Round 4 | P1 | 视频加载失败时可能黑屏，需回退 `ocean-poster` | ⏳ 待 Round 4 | — |
-| R1-05 | Round 3 | P1 | 升级/卸载时用户数据保留说明缺失 | ⏳ 待 Round 3 | — |
+| R1-05 | Round 2 | P1 | 升级/卸载时用户数据保留说明缺失 | ✅ 已说明（见「数据保留」） | `01c3afc` |
 
 ---
 
@@ -57,8 +57,37 @@
 
 ---
 
-## Round 2 — 本地数据可靠性（P0/P1）⏳ 规划中
-- 待审计：CRUD 持久化、重启恢复、每任务唯一会话、删除任务保留历史、空/损坏/旧版本数据、错误导入不覆盖、升级/卸载数据保留说明、`schemaVersion` 校验。
+## 数据保留说明（R1-05，已澄清）
+- 用户数据（`abyssal-reverie.sqlite` + 会话/任务/设置）位于 Tauri `app_data_dir`，即
+  `C:\Users\<用户>\AppData\Roaming\abyssal-reverie\`，**独立于安装目录**。
+- **升级**：NSIS 就地升级只替换安装目录内的文件，不动 `appData` → 数据保留。
+- **卸载**：Tauri NSIS 默认**不删除** `appData`（位于 Roaming，非安装路径）→ 用户数据保留；如需彻底清除，需手动删除上述目录。
+- 因此「升级/卸载数据保留」默认满足，仅作说明，不额外实现。
+
+## Round 2 — 本地数据可靠性（P0/P1）✅
+**验收 EXE**：`src-tauri/target/release/abyssal-reverie.exe`（提交 `01c3afc`）
+
+### 本轮修复
+- **R1（corrupt DB → P0 无法启动）**：`db::open_at` 改用 `try_open_at` + `PRAGMA integrity_check` 健康检查。若打开/迁移/播种失败，或 DB 不健康，则将文件及其 `-wal`/`-shm` 兄弟重命名为 `.corrupt-<timestamp>`（保留以便人工用 `sqlite3 .recover` 抢救），并在原路径创建全新数据库。应用**始终能启动**，损坏数据不被静默丢弃。
+- **错误导入不覆盖（P1）**：`import_data` 在事务内先 `validate_import` 全量校验，任一字段非法即返回 `ValidationError` 且事务回滚，现有任务/会话/设置**原样保留**。新增测试 `import_rejects_a_bad_backup_and_leaves_existing_data_intact` 断言被拒导入（超长标题）后既有数据不变。
+
+### 审计结论（既有机制已健壮，无需改动）
+- **CRUD 持久化**：任务增改删、设置保存、会话在 complete/reset/switch 时写入，均有事务 + 校验。
+- **重启恢复**：`bootstrap` 读取 DB；`Running` 且过期 → 自动补完成（recovery）；`Paused` → 保持（Round 1）。
+- **每任务唯一会话**：每次 `start_timer` 生成新 `active_session_id`（UUID）；`complete_timer` 用 `ON CONFLICT(id) DO NOTHING` 幂等；无重复会话。
+- **删除任务保留历史**：`sessions.task_id` 外键 `ON DELETE SET NULL`，删除任务后会话行与快照（`task_title_snapshot`/`project_snapshot`）保留。（测试 `deleting_a_task_preserves_its_session_with_a_null_task_id`）
+- **空库**：`user_version=0` 自动建表 v1 + 播种默认设置/空闲计时器。（测试 `empty_database_is_created_and_seeded_on_first_open`）
+- **旧版本**：导出备份 `schema_version` 高于当前（`EXPORT_SCHEMA_VERSION=1`）被 `validate_import` 拒绝；内部 DB `user_version` 高于 `LATEST_SCHEMA_VERSION` 时 `run_migrations` 视为已迁移（向前兼容，当前无 schema 变更，冻结范围内不做降级路径——列为已知限制）。
+- **schemaVersion 校验**：DB `user_version` 迁移 + 备份 `schema_version` 双重校验。
+
+### 测试与构建验证
+- `cargo test`：**62 passed**（含新增 corrupt-recovery、empty-DB-create、bad-import-intact）。
+- `tsc --noEmit`：clean；`vitest run`：**16 passed**；真实 EXE 已重建。
+
+### 需用户在真实 Windows 环境验证
+1. 正常使用数日后，确认任务/会话/设置跨重启保留。
+2. 删除某任务后，统计页该项目历史仍计（快照保留）。
+3. （可选）将 `appData\abyssal-reverie.sqlite` 替换为乱码文件后启动 → 应用应正常启动，且乱码文件被重命名为 `.corrupt-<时间戳>` 保留。
 
 ## Round 3 — 桌面生命周期（P1）⏳ 规划中
 - 关闭→托盘；托盘退出→真实退出；双击 EXE 单实例；打包后托盘图标/菜单；开机自启默认关闭；**全局快捷键冲突优雅降级（R1-02）**；设置持久；通知关闭仍完成。

@@ -4,6 +4,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 pub mod commands;
 pub mod db;
@@ -68,8 +69,6 @@ pub fn run() {
         ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcut(GLOBAL_SHORTCUT)
-                .expect("invalid global shortcut accelerator")
                 .with_handler(|app, _shortcut, _event| {
                     // Reveal the window if it is hidden to the tray, then let
                     // the existing tray-action handler toggle start/pause/resume
@@ -91,6 +90,22 @@ pub fn run() {
             app.manage(AppState { db: Mutex::new(conn) });
 
             tray::build_tray(app.handle())?;
+
+            // Register the global hotkey at runtime (not in the plugin builder)
+            // so a conflict with another application degrades gracefully instead
+            // of crashing the app at launch. The builder's global handler above
+            // still fires for this shortcut once it is registered. On conflict,
+            // warn the user (event + log) and continue without the hotkey.
+            match app.global_shortcut().register(GLOBAL_SHORTCUT) {
+                Ok(()) => {}
+                Err(err) => {
+                    eprintln!(
+                        "[Abyssal Reverie] global shortcut '{GLOBAL_SHORTCUT}' could not be \
+                         registered (likely already in use by another application): {err}"
+                    );
+                    let _ = app.emit("global-shortcut-conflict", GLOBAL_SHORTCUT);
+                }
+            }
 
             // Closing the main window hides it to the tray instead of quitting,
             // so a running focus session survives a stray close.

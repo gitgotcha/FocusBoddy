@@ -41,6 +41,9 @@ export interface AppGateway {
   subscribeTimerExpired(cb: (payload: TimerExpiredPayload) => void): () => void
   /** Subscribes to tray menu actions (pause/resume, reset). Returns an unsubscribe. */
   subscribeTrayAction(cb: (action: TrayAction) => void): () => void
+  /** Subscribes to the global-shortcut conflict warning (hotkey taken by another
+   *  app). The callback receives the conflicting accelerator string. */
+  subscribeGlobalShortcutConflict(cb: (shortcut: string) => void): () => void
   /** Whether the app launches at Windows login (autostart plugin state). */
   getAutostart(): Promise<boolean>
   /** Enables/disables launch-at-login; resolves to the resulting state. */

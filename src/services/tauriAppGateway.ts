@@ -63,6 +63,15 @@ export class TauriAppGateway implements AppGateway {
     return () => { stopped = true; unlisten?.() }
   }
 
+  subscribeGlobalShortcutConflict(cb: (shortcut: string) => void): () => void {
+    let unlisten: UnlistenFn | undefined
+    let stopped = false
+    void listen<{ shortcut: string }>('global-shortcut-conflict', e => cb(e.payload.shortcut))
+      .then(fn => { unlisten = stopped ? void fn() : fn })
+      .catch(() => undefined)
+    return () => { stopped = true; unlisten?.() }
+  }
+
   getAutostart() { return invoke<boolean>('get_autostart') }
   setAutostart(enabled: boolean) { return invoke<boolean>('set_autostart', { enabled }) }
 

@@ -1465,6 +1465,7 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [weekStats, setWeekStats] = useState<Statistics | null>(null);
   const [timer, setTimer] = useState<TimerSnapshot | null>(null);
+  const [shortcutConflict, setShortcutConflict] = useState<string | null>(null);
 
   // Ref mirrors so async callbacks always see the latest snapshot without
   // becoming stale closures.
@@ -1618,6 +1619,15 @@ export default function App() {
     });
   }, [gateway, handlePause, handleResume, handleReset]);
 
+  // Global-shortcut conflict (another app owns the hotkey): show a warning
+  // banner instead of failing silently. The app launched fine — the hotkey is
+  // just disabled until the conflict is resolved and the app restarted.
+  useEffect(() => {
+    return gateway.subscribeGlobalShortcutConflict(shortcut => {
+      setShortcutConflict(shortcut);
+    });
+  }, [gateway]);
+
   // Load persisted state once, then recover an expired running timer
   // (recovery=true → no auto-break per spec 4.2).
   useEffect(() => {
@@ -1710,6 +1720,34 @@ export default function App() {
       display: "flex",
     }}>
       <OceanVideo />
+
+      {shortcutConflict && (
+        <div
+          role="alert"
+          style={{
+            position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)",
+            zIndex: 50, maxWidth: "min(680px, 92vw)", padding: "10px 14px",
+            borderRadius: 10, background: "rgba(60, 22, 22, 0.92)",
+            border: "1px solid rgba(255, 120, 120, 0.55)", color: "#ffd9d9",
+            fontSize: 13, lineHeight: 1.5, boxShadow: "0 8px 28px rgba(0,0,0,0.45)",
+            display: "flex", alignItems: "center", gap: 12, backdropFilter: "blur(6px)",
+          }}
+        >
+          <span style={{ flex: 1 }}>
+            全局快捷键 <code style={{ color: "#ffb3b3" }}>{shortcutConflict}</code> 被其它程序占用，热键已禁用。关闭占用程序后重新打开本应用即可恢复。
+          </span>
+          <button
+            onClick={() => setShortcutConflict(null)}
+            aria-label="关闭提示"
+            style={{
+              background: "transparent", border: "none", color: "#ffd9d9",
+              fontSize: 16, lineHeight: 1, cursor: "pointer", padding: 2,
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       <Sidebar active={nav} onNav={setNav} />
 
