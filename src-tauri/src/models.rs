@@ -111,6 +111,84 @@ impl SessionStatus {
     }
 }
 
+// ─── Tags (v1.1) ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TagKind {
+    System,
+    Custom,
+}
+
+impl TagKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TagKind::System => "system",
+            TagKind::Custom => "custom",
+        }
+    }
+
+    pub fn parse_str(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(TagKind::System),
+            "custom" => Some(TagKind::Custom),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tag {
+    pub id: String,
+    pub name: String,
+    pub kind: TagKind,
+    pub is_fallback: bool,
+    pub sort_order: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTagInput {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTagInput {
+    pub id: String,
+    /// Rename when present; empty/whitespace or >20 chars rejected.
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderTagInput {
+    pub id: String,
+    /// -1 moves the tag one slot up (earlier), +1 one slot down (later).
+    pub direction: i64,
+}
+
+/// Shown to the user before a tag deletion is confirmed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagDeletePreview {
+    pub tag_id: String,
+    pub affected_tasks: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteTagResult {
+    pub deleted_tag_id: String,
+    pub fallback_tag_id: String,
+    pub reassigned_tasks: i64,
+    pub tags: Vec<Tag>,
+    pub tasks: Vec<Task>,
+}
+
 // ─── Persisted records ───────────────────────────────────────────────────────
 
 /// Stable id of the permanent fallback tag ("其他"), seeded by the v3 schema
@@ -331,6 +409,7 @@ pub struct UpdateTaskInput {
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapPayload {
     pub tasks: Vec<Task>,
+    pub tags: Vec<Tag>,
     pub settings: AppSettings,
     pub timer: TimerSnapshot,
     pub sessions: Vec<TimerSession>,

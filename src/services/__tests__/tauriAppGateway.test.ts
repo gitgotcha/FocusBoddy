@@ -108,4 +108,28 @@ describe('TauriAppGateway', () => {
     listener({ payload: { shortcut: 'CommandOrControl+Alt+Space' } })
     expect(handler).toHaveBeenCalledWith('CommandOrControl+Alt+Space')
   })
+
+  it('maps the tag commands (v1.1)', async () => {
+    invokeMock.mockResolvedValue({})
+    const gateway = new TauriAppGateway()
+
+    await gateway.listTags()
+    await gateway.createTag({ name: '运动' })
+    await gateway.updateTag({ id: 'tag-1', name: ' renamed ' })
+    await gateway.reorderTag({ id: 'tag-1', direction: -1 })
+    await gateway.previewDeleteTag('tag-1')
+    await gateway.deleteTag('tag-1')
+
+    expect(invokeMock.mock.calls.map(([name]) => name)).toEqual([
+      'list_tags',
+      'create_tag',
+      'update_tag',
+      'reorder_tag',
+      'preview_delete_tag',
+      'delete_tag',
+    ])
+    expect(invokeMock).toHaveBeenCalledWith('create_tag', { input: { name: '运动' } })
+    expect(invokeMock).toHaveBeenCalledWith('reorder_tag', { input: { id: 'tag-1', direction: -1 } })
+    expect(invokeMock).toHaveBeenCalledWith('delete_tag', { id: 'tag-1' })
+  })
 })

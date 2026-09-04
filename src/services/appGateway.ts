@@ -3,20 +3,26 @@ import type {
   BootstrapPayload,
   CompleteTimerInput,
   CompleteTimerResult,
+  CreateTagInput,
   CreateTaskInput,
+  DeleteTagResult,
   ExportSummary,
   ImportPreview,
   ImportSummary,
+  ReorderTagInput,
   SaveSettingsResult,
   SessionQuery,
   StartTimerInput,
   Statistics,
   StatisticsQuery,
   SwitchTimerModeInput,
+  Tag,
+  TagDeletePreview,
   Task,
   TimerRevisionInput,
   TimerSession,
   TimerSnapshot,
+  UpdateTagInput,
   UpdateTaskInput,
 } from '../domain/models'
 import type { TrayAction, TrayIndicator, TimerExpiredPayload } from '../domain/tray'
@@ -32,6 +38,13 @@ export interface AppGateway {
   createTask(input: CreateTaskInput): Promise<Task>
   updateTask(input: UpdateTaskInput): Promise<Task>
   deleteTask(id: string): Promise<void>
+  // ─── Tags (v1.1) ──────────────────────────────────────────────────────────
+  listTags(): Promise<Tag[]>
+  createTag(input: CreateTagInput): Promise<Tag>
+  updateTag(input: UpdateTagInput): Promise<Tag>
+  reorderTag(input: ReorderTagInput): Promise<Tag[]>
+  previewDeleteTag(id: string): Promise<TagDeletePreview>
+  deleteTag(id: string): Promise<DeleteTagResult>
   saveSettings(input: AppSettings): Promise<SaveSettingsResult>
   listSessions(query: SessionQuery): Promise<TimerSession[]>
   getStatistics(query: StatisticsQuery): Promise<Statistics>

@@ -3,10 +3,11 @@ use uuid::Uuid;
 
 use crate::error::CommandError;
 use crate::models::{
-    AppSettings, CompleteTimerInput, CompleteTimerResult, CreateTaskInput, DayStat, ExportBundle,
-    ImportSummary, ProjectStat, SaveSettingsResult, SessionQuery, SessionStatus, StartTimerInput,
-    Statistics, StatisticsQuery, SwitchTimerModeInput, Task, TaskPriority, TimerMode,
-    TimerSession, TimerSnapshot, TimerState, UpdateTaskInput,
+    AppSettings, CompleteTimerInput, CompleteTimerResult, CreateTagInput, CreateTaskInput, DayStat,
+    DeleteTagResult, ExportBundle, ImportSummary, ProjectStat, SaveSettingsResult, SessionQuery,
+    SessionStatus, StartTimerInput, Statistics, StatisticsQuery, SwitchTimerModeInput, Tag,
+    TagDeletePreview, TagKind, Task, TaskPriority, TimerMode, TimerSession, TimerSnapshot,
+    TimerState, UpdateTagInput, UpdateTaskInput,
 };
 
 // ─── Fixed snapshot labels (design spec §3) ──────────────────────────────────
@@ -19,6 +20,12 @@ pub const BREAK_PROJECT: &str = "休息";
 pub const MIN_POMODORO_TARGET: i64 = 1;
 pub const MAX_POMODORO_TARGET: i64 = 99;
 pub const MAX_TITLE_CHARS: usize = 200;
+/// Tag display-name limit, counted in Unicode characters (not bytes — Chinese
+/// must not be miscounted).
+pub const MAX_TAG_NAME_CHARS: usize = 20;
+/// Hard cap on the number of tags, including the system tags. Prevents
+/// meaningless unbounded growth (spec §15).
+pub const MAX_TAGS: usize = 100;
 pub const DEFAULT_PROJECT: &str = "通用";
 
 pub const MIN_DURATION_MINUTES: i64 = 1;
@@ -289,6 +296,243 @@ pub fn delete_task(conn: &Connection, id: &str) -> Result<(), CommandError> {
         return Err(CommandError::not_found(format!("task {id} not found")));
     }
     Ok(())
+}
+
+// ─── Tags (v1.1, spec §9) ────────────────────────────────────────────────────
+
+fn tag_from_row(row: &Row<'_>) -> rusqlite::Result<Tag> {
+    let kind_text: String = row.get("kind")?;
+    Ok(Tag {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        kind: TagKind::parse_str(&kind_text).unwrap_or(TagKind::Custom),
+        is_fallback: row.get::<_, i64>("is_fallback")? != 0,
+        sort_order: row.get("sort_order")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+/// Validates and trims a tag display name. Length is measured in Unicode
+/// characters so Chinese names are not miscounted as bytes (spec §9.2).
+fn validate_tag_name(raw: &str) -> Result<String, CommandError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(CommandError::validation("标签名称不能为空"));
+    }
+    let char_count = trimmed.chars().count();
+    if char_count > MAX_TAG_NAME_CHARS {
+        return Err(CommandError::validation(format!(
+            "标签名称不能超过 {MAX_TAG_NAME_CHARS} 个字符"
+        )));
+    }
+    if trimmed.chars().any(|c| c.is_control() || c == '\n' || c == '\r') {
+        return Err(CommandError::validation("标签名称不能包含控制字符或换行符"));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Returns the tags in display order (spec §11.5: the UI renders them as-is).
+pub fn list_tags(conn: &Connection) -> Result<Vec<Tag>, CommandError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, kind, is_fallback, sort_order, created_at, updated_at
+         FROM tags ORDER BY sort_order, created_at",
+    )?;
+    let rows = stmt.query_map([], tag_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn create_tag(conn: &Connection, input: &CreateTagInput) -> Result<Tag, CommandError> {
+    let name = validate_tag_name(&input.name)?;
+    let normalized = name.to_lowercase();
+
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))?;
+    if count as usize >= MAX_TAGS {
+        return Err(CommandError::validation(format!(
+            "标签数量已达上限（{MAX_TAGS} 个）"
+        )));
+    }
+
+    let duplicate: Option<String> = conn
+        .query_row(
+            "SELECT id FROM tags WHERE normalized_name = ?1",
+            params![normalized],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if duplicate.is_some() {
+        return Err(CommandError::validation(format!("标签“{name}”已存在")));
+    }
+
+    let now = now_millis();
+    let sort_order: i64 = conn
+        .query_row("SELECT COALESCE(MAX(sort_order) + 1, 0) FROM tags", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    conn.execute(
+        "INSERT INTO tags (id, name, normalized_name, kind, is_fallback, sort_order,
+                           created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'custom', 0, ?4, ?5, ?5)",
+        params![Uuid::new_v4().to_string(), name, normalized, sort_order, now],
+    )?;
+
+    Ok(list_tags(conn)?.into_iter().find(|t| t.name == name).expect("tag just inserted"))
+}
+
+pub fn update_tag(conn: &Connection, input: &UpdateTagInput) -> Result<Tag, CommandError> {
+    let mut tag = conn
+        .query_row(
+            "SELECT id, name, kind, is_fallback, sort_order, created_at, updated_at
+             FROM tags WHERE id = ?1",
+            params![input.id],
+            tag_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| CommandError::not_found(format!("tag {} not found", input.id)))?;
+
+    if let Some(name) = &input.name {
+        let cleaned = validate_tag_name(name)?;
+        let normalized = cleaned.to_lowercase();
+        let duplicate: Option<String> = conn
+            .query_row(
+                "SELECT id FROM tags WHERE normalized_name = ?1 AND id != ?2",
+                params![normalized, input.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if duplicate.is_some() {
+            return Err(CommandError::validation(format!("标签“{cleaned}”已存在")));
+        }
+        tag.name = cleaned;
+        tag.updated_at = now_millis();
+        conn.execute(
+            "UPDATE tags SET name = ?1, normalized_name = ?2, updated_at = ?3 WHERE id = ?4",
+            params![tag.name, normalized, tag.updated_at, tag.id],
+        )?;
+    }
+
+    Ok(tag)
+}
+
+/// Swaps the tag's sort order with its neighbour (up = earlier, down = later).
+/// At a boundary the call is a no-op. Returns the updated list.
+pub fn reorder_tag(
+    conn: &Connection,
+    input: &crate::models::ReorderTagInput,
+) -> Result<Vec<Tag>, CommandError> {
+    let (id, sort_order): (String, i64) = conn
+        .query_row(
+            "SELECT id, sort_order FROM tags WHERE id = ?1",
+            params![input.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| CommandError::not_found(format!("tag {} not found", input.id)))?;
+
+    let neighbour: Option<(String, i64)> = if input.direction < 0 {
+        conn.query_row(
+            "SELECT id, sort_order FROM tags WHERE sort_order < ?1
+             ORDER BY sort_order DESC LIMIT 1",
+            params![sort_order],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+    } else {
+        conn.query_row(
+            "SELECT id, sort_order FROM tags WHERE sort_order > ?1
+             ORDER BY sort_order ASC LIMIT 1",
+            params![sort_order],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+    };
+
+    if let Some((neighbour_id, neighbour_sort)) = neighbour {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("UPDATE tags SET sort_order = ?1 WHERE id = ?2", params![neighbour_sort, id])?;
+        tx.execute("UPDATE tags SET sort_order = ?1 WHERE id = ?2", params![sort_order, neighbour_id])?;
+        tx.commit()?;
+    }
+
+    list_tags(conn)
+}
+
+/// Reports how many tasks reference the tag, for the delete confirmation
+/// dialog. Deleting the fallback tag is rejected here as well so the UI can
+/// surface it before the destructive call.
+pub fn preview_delete_tag(conn: &Connection, id: &str) -> Result<TagDeletePreview, CommandError> {
+    let tag = conn
+        .query_row(
+            "SELECT id, name, kind, is_fallback, sort_order, created_at, updated_at
+             FROM tags WHERE id = ?1",
+            params![id],
+            tag_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| CommandError::not_found(format!("tag {id} not found")))?;
+    if tag.is_fallback {
+        return Err(CommandError::conflict("保底标签不能删除"));
+    }
+    let affected_tasks: i64 =
+        conn.query_row("SELECT COUNT(*) FROM tasks WHERE tag_id = ?1", params![id], |row| {
+            row.get(0)
+        })?;
+    Ok(TagDeletePreview { tag_id: tag.id, affected_tasks })
+}
+
+/// Two-phase delete per spec §9.3: the UI confirms with the affected count,
+/// then this runs everything in ONE transaction — reassign the tag's tasks to
+/// the fallback tag, let the FKs null out timer/session references (snapshots
+/// are preserved), and delete the tag. The affected count is recomputed here;
+/// the preview value is never trusted.
+pub fn delete_tag(conn: &mut Connection, id: &str) -> Result<DeleteTagResult, CommandError> {
+    let tx = conn.transaction()?;
+
+    let tag = tx
+        .query_row(
+            "SELECT id, name, kind, is_fallback, sort_order, created_at, updated_at
+             FROM tags WHERE id = ?1",
+            params![id],
+            tag_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| CommandError::not_found(format!("tag {id} not found")))?;
+    if tag.is_fallback {
+        return Err(CommandError::conflict("保底标签不能删除"));
+    }
+
+    let (fallback_id, _fallback_name) = fallback_tag(&tx)?;
+    let reassigned = tx.execute(
+        "UPDATE tasks SET tag_id = ?1, updated_at = ?2 WHERE tag_id = ?3",
+        params![fallback_id, now_millis(), id],
+    )?;
+
+    // tasks.tag_id is RESTRICT, so the tag can only be deleted after the
+    // reassignment above. timer_state.tag_id and sessions.tag_id are
+    // SET NULL — snapshots (tag_name_snapshot) are never touched.
+    tx.execute("DELETE FROM tags WHERE id = ?1", params![id])?;
+
+    // The FK-based nulling happens on DELETE; assert it actually did.
+    let dangling_timer: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM timer_state WHERE tag_id = ?1",
+        params![id],
+        |row| row.get(0),
+    )?;
+    if dangling_timer > 0 {
+        return Err(CommandError::database(
+            "timer_state still references the deleted tag after delete_tag"
+        ));
+    }
+
+    tx.commit()?;
+
+    Ok(DeleteTagResult {
+        deleted_tag_id: id.to_owned(),
+        fallback_tag_id: fallback_id,
+        reassigned_tasks: reassigned as i64,
+        tags: list_tags(conn)?,
+        tasks: list_tasks(conn)?,
+    })
 }
 
 // ─── Settings, timer and sessions ────────────────────────────────────────────
@@ -631,7 +875,7 @@ pub fn start_timer(
     // its tag; breaks and no-task rounds use the fallback tag. Mid-run tag
     // changes never alter this snapshot.
     let (tag_id, tag_name) = match (&input.selected_task_id, input.mode) {
-        (Some(id), TimerMode::Focus) => {
+        (Some(_), TimerMode::Focus) => {
             let task = task.as_ref().expect("task resolved above");
             let name: String = tx.query_row(
                 "SELECT name FROM tags WHERE id = ?1",
@@ -1694,6 +1938,265 @@ mod tests {
 
         settings.daily_goal = 100;
         assert!(save_settings(&conn, &settings).is_err());
+    }
+
+    // ─── Tag domain tests (v1.1, spec §9) ─────────────────────────────────────
+
+    #[test]
+    fn migrates_seeded_tags_are_listed_in_order() {
+        let conn = db::open_in_memory().expect("db");
+
+        let tags = list_tags(&conn).expect("list tags");
+
+        assert_eq!(tags.len(), 4);
+        assert_eq!(tags[0].name, "学习");
+        assert_eq!(tags[1].name, "工作");
+        assert_eq!(tags[2].name, "生活");
+        assert_eq!(tags[3].name, "其他");
+        assert!(tags.iter().all(|t| t.kind == TagKind::System));
+        assert_eq!(tags[3].id, "system-other");
+        assert!(tags[3].is_fallback);
+        assert!(tags[..3].iter().all(|t| !t.is_fallback));
+    }
+
+    #[test]
+    fn creates_a_custom_tag_and_lists_it_last() {
+        let conn = db::open_in_memory().expect("db");
+
+        let created = create_tag(&conn, &CreateTagInput { name: "  运动  ".to_owned() })
+            .expect("create tag");
+
+        assert_eq!(created.name, "运动");
+        assert_eq!(created.kind, TagKind::Custom);
+        assert!(!created.is_fallback);
+
+        let tags = list_tags(&conn).expect("list");
+        assert_eq!(tags.len(), 5);
+        assert_eq!(tags[4].name, "运动", "new tag appends after the defaults");
+    }
+
+    #[test]
+    fn rejects_duplicate_tag_names_case_insensitively() {
+        let conn = db::open_in_memory().expect("db");
+
+        create_tag(&conn, &CreateTagInput { name: "阅读".to_owned() }).expect("first");
+
+        let duplicate = create_tag(&conn, &CreateTagInput { name: "  阅读 ".to_owned() });
+        assert!(matches!(duplicate, Err(ref e) if e.code == crate::error::ErrorCode::ValidationError));
+
+        // Also against the seeded system tags (normalized_name compare).
+        let clash = create_tag(&conn, &CreateTagInput { name: "工作".to_owned() });
+        assert!(matches!(clash, Err(ref e) if e.code == crate::error::ErrorCode::ValidationError));
+    }
+
+    #[test]
+    fn rejects_blank_overlong_or_control_char_tag_names() {
+        let conn = db::open_in_memory().expect("db");
+
+        assert!(create_tag(&conn, &CreateTagInput { name: "   ".to_owned() }).is_err());
+        assert!(create_tag(&conn, &CreateTagInput { name: "\n".to_owned() }).is_err());
+        assert!(
+            create_tag(&conn, &CreateTagInput {
+                name: "标".repeat(MAX_TAG_NAME_CHARS + 1),
+            })
+            .is_err(),
+            "names are counted in characters, so 21 Chinese chars must fail"
+        );
+        // Exactly 20 chars is fine.
+        create_tag(&conn, &CreateTagInput { name: "标".repeat(MAX_TAG_NAME_CHARS) })
+            .expect("20-char name is legal");
+    }
+
+    #[test]
+    fn enforces_hard_limit_of_100_tags() {
+        let conn = db::open_in_memory().expect("db");
+        // 4 system tags exist; create up to the cap.
+        for i in 4..MAX_TAGS {
+            create_tag(&conn, &CreateTagInput { name: format!("标签{i}") }).expect("within cap");
+        }
+        let overflow = create_tag(&conn, &CreateTagInput { name: "超额".to_owned() });
+        assert!(matches!(overflow, Err(ref e) if e.code == crate::error::ErrorCode::ValidationError));
+    }
+
+    #[test]
+    fn renames_a_tag_and_rejects_conflicts() {
+        let conn = db::open_in_memory().expect("db");
+        let tag = create_tag(&conn, &CreateTagInput { name: "旧名".to_owned() }).expect("create");
+
+        let renamed = update_tag(&conn, &UpdateTagInput {
+            id: tag.id.clone(),
+            name: Some("新名".to_owned()),
+        })
+        .expect("rename");
+        assert_eq!(renamed.name, "新名");
+
+        // Rename onto another tag's name is rejected.
+        let clash = update_tag(&conn, &UpdateTagInput {
+            id: tag.id.clone(),
+            name: Some("工作".to_owned()),
+        });
+        assert!(matches!(clash, Err(ref e) if e.code == crate::error::ErrorCode::ValidationError));
+
+        // The fallback tag can be renamed but never removed via update.
+        let fallback = list_tags(&conn).expect("list").into_iter()
+            .find(|t| t.is_fallback).expect("fallback");
+        let renamed_fallback = update_tag(&conn, &UpdateTagInput {
+            id: fallback.id.clone(),
+            name: Some("其余".to_owned()),
+        })
+        .expect("fallback rename is allowed");
+        assert_eq!(renamed_fallback.name, "其余");
+    }
+
+    #[test]
+    fn reorders_tag_by_swapping_with_neighbour() {
+        let conn = db::open_in_memory().expect("db");
+        let custom = create_tag(&conn, &CreateTagInput { name: "自定义".to_owned() }).expect("create");
+
+        // Move up: swaps with 其他 (the previous tag in display order).
+        let moved_up = reorder_tag(&conn, &crate::models::ReorderTagInput {
+            id: custom.id.clone(),
+            direction: -1,
+        })
+        .expect("reorder");
+        assert_eq!(moved_up[3].name, "自定义");
+        assert_eq!(moved_up[4].name, "其他");
+
+        // Moving the first tag up is a no-op.
+        let unchanged = reorder_tag(&conn, &crate::models::ReorderTagInput {
+            id: moved_up[0].id.clone(),
+            direction: -1,
+        })
+        .expect("reorder at boundary");
+        assert_eq!(unchanged[0].name, "学习");
+    }
+
+    #[test]
+    fn preview_delete_reports_affected_tasks() {
+        let conn = db::open_in_memory().expect("db");
+        let tag = create_tag(&conn, &CreateTagInput { name: "项目".to_owned() }).expect("create");
+        for i in 0..2 {
+            insert_task(&conn, &CreateTaskInput {
+                title: format!("任务{i}"),
+                pomodoro_target: 1,
+                priority: TaskPriority::Med,
+                project: "通用".to_owned(),
+            })
+            .expect("task");
+            conn.execute("UPDATE tasks SET tag_id = ?1 WHERE title = ?2", params![tag.id, format!("任务{i}")])
+                .expect("attach tag");
+        }
+
+        let preview = preview_delete_tag(&conn, &tag.id).expect("preview");
+        assert_eq!(preview.affected_tasks, 2);
+
+        let fallback = list_tags(&conn).expect("list").into_iter().find(|t| t.is_fallback).unwrap();
+        let conflict = preview_delete_tag(&conn, &fallback.id);
+        assert!(matches!(conflict, Err(ref e) if e.code == crate::error::ErrorCode::Conflict));
+    }
+
+    #[test]
+    fn delete_tag_reassigns_tasks_and_preserves_snapshots() {
+        let mut conn = db::open_in_memory().expect("db");
+        let tag = create_tag(&conn, &CreateTagInput { name: "将被删除".to_owned() }).expect("create");
+
+        // A task on the tag + a session whose snapshot froze that tag name.
+        insert_task(&conn, &CreateTaskInput {
+            title: "会转移的任务".to_owned(),
+            pomodoro_target: 1,
+            priority: TaskPriority::Med,
+            project: "通用".to_owned(),
+        })
+        .expect("task");
+        conn.execute("UPDATE tasks SET tag_id = ?1", params![tag.id]).expect("attach");
+        conn.execute(
+            "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                                   tag_name_snapshot, mode, status, planned_seconds,
+                                   focused_seconds, started_at, ended_at, finish_reason,
+                                   statistics_eligible, qualification_reason)
+             VALUES ('s1', NULL, 'task', 'P', ?1, ?2, 'focus', 'completed', 1500, 600, 1, 2,
+                     'elapsed', 1, 'qualified')",
+            params![tag.id, tag.name],
+        )
+        .expect("session");
+
+        let result = delete_tag(&mut conn, &tag.id).expect("delete");
+
+        assert_eq!(result.reassigned_tasks, 1);
+        assert_eq!(result.deleted_tag_id, tag.id);
+
+        // Task moved to the fallback tag.
+        let tasks = list_tasks(&conn).expect("tasks");
+        assert_eq!(tasks[0].tag_id, result.fallback_tag_id);
+
+        // Historical session keeps its frozen snapshot; the stable id is nulled.
+        let snapshot: Option<String> = conn
+            .query_row("SELECT tag_name_snapshot FROM sessions WHERE id = 's1'", [], |r| r.get(0))
+            .expect("snapshot preserved");
+        assert_eq!(snapshot.as_deref(), Some(tag.name.as_str()));
+        let history_tag: Option<String> = conn
+            .query_row("SELECT tag_id FROM sessions WHERE id = 's1'", [], |r| r.get(0))
+            .expect("history tag id nulled");
+        assert_eq!(history_tag, None, "tag_id uses ON DELETE SET NULL");
+
+        // The tag is gone and cannot be deleted twice.
+        assert!(matches!(
+            delete_tag(&mut conn, &tag.id),
+            Err(ref e) if e.code == crate::error::ErrorCode::NotFound
+        ));
+    }
+
+    #[test]
+    fn delete_fallback_tag_is_rejected() {
+        let mut conn = db::open_in_memory().expect("db");
+        let fallback = list_tags(&conn).expect("list").into_iter().find(|t| t.is_fallback).unwrap();
+
+        let rejected = delete_tag(&mut conn, &fallback.id);
+        assert!(matches!(rejected, Err(ref e) if e.code == crate::error::ErrorCode::Conflict));
+        assert_eq!(count_tags(&conn), 4);
+    }
+
+    fn count_tags(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0)).expect("count")
+    }
+
+    #[test]
+    fn new_tasks_default_to_fallback_tag() {
+        let conn = db::open_in_memory().expect("db");
+        let task = insert_task(&conn, &create_input("默认标签任务")).expect("task");
+        let fallback = list_tags(&conn).expect("list").into_iter().find(|t| t.is_fallback).unwrap();
+        assert_eq!(task.tag_id, fallback.id);
+    }
+
+    #[test]
+    fn start_timer_freezes_task_tag() {
+        let mut conn = db::open_in_memory().expect("db");
+        let tag = create_tag(&conn, &CreateTagInput { name: "工作".to_owned() });
+        assert!(tag.is_err(), "工作 is a seeded system tag — use another name");
+        let tag = create_tag(&conn, &CreateTagInput { name: "深度工作".to_owned() }).expect("create");
+
+        insert_task(&conn, &CreateTaskInput {
+            title: "带标签的任务".to_owned(),
+            pomodoro_target: 1,
+            priority: TaskPriority::Med,
+            project: "通用".to_owned(),
+        })
+        .expect("task");
+        conn.execute("UPDATE tasks SET tag_id = ?1 WHERE title = '带标签的任务'", params![tag.id])
+            .expect("attach tag");
+        let task_id: String = conn
+            .query_row("SELECT id FROM tasks WHERE title = '带标签的任务'", [], |r| r.get(0))
+            .expect("task id");
+
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0,
+            mode: TimerMode::Focus,
+            selected_task_id: Some(task_id),
+        })
+        .expect("start");
+
+        assert_eq!(timer.tag_id.as_deref(), Some(tag.id.as_str()));
+        assert_eq!(timer.tag_name_snapshot.as_deref(), Some("深度工作"));
     }
 
     // ─── Statistics tests (T9) ───────────────────────────────────────────────

@@ -5,10 +5,13 @@ import type {
   BootstrapPayload,
   CompleteTimerInput,
   CompleteTimerResult,
+  CreateTagInput,
   CreateTaskInput,
+  DeleteTagResult,
   ExportSummary,
   ImportPreview,
   ImportSummary,
+  ReorderTagInput,
   SaveSettingsResult,
   SessionQuery,
   StartTimerInput,
@@ -16,11 +19,14 @@ import type {
   StatisticsDayBoundary,
   StatisticsQuery,
   SwitchTimerModeInput,
+  Tag,
+  TagDeletePreview,
   Task,
   TimerMode,
   TimerRevisionInput,
   TimerSession,
   TimerSnapshot,
+  UpdateTagInput,
   UpdateTaskInput,
 } from '../domain/models'
 import type { TrayAction, TrayIndicator, TimerExpiredPayload } from '../domain/tray'
@@ -49,6 +55,12 @@ export class FakeAppGateway implements AppGateway {
   private settings: AppSettings = { ...DEFAULT_SETTINGS, updatedAt: Date.now() }
   private timer: TimerSnapshot = idleTimerForMode('focus', this.settings)
   private sessions: TimerSession[] = []
+  private tags: Tag[] = [
+    { id: 'system-study', name: '学习', kind: 'system', isFallback: false, sortOrder: 0, createdAt: 0, updatedAt: 0 },
+    { id: 'system-work', name: '工作', kind: 'system', isFallback: false, sortOrder: 1, createdAt: 0, updatedAt: 0 },
+    { id: 'system-life', name: '生活', kind: 'system', isFallback: false, sortOrder: 2, createdAt: 0, updatedAt: 0 },
+    { id: 'system-other', name: '其他', kind: 'system', isFallback: true, sortOrder: 3, createdAt: 0, updatedAt: 0 },
+  ]
   private failures: InjectedError[] = []
 
   /** Queue an error that the next gateway call will reject with. */
@@ -127,6 +139,7 @@ export class FakeAppGateway implements AppGateway {
     this.takeFailure()
     return {
       tasks: this.tasks,
+      tags: this.tags,
       settings: this.settings,
       timer: this.timer,
       sessions: this.sessions,
@@ -262,6 +275,98 @@ export class FakeAppGateway implements AppGateway {
     }
   }
 
+  // ─── Tags (v1.1, in-memory) ───────────────────────────────────────────────
+
+  async listTags(): Promise<Tag[]> {
+    this.takeFailure()
+    return [...this.tags].sort((a, b) => a.sortOrder - b.sortOrder)
+  }
+
+  async createTag(input: CreateTagInput): Promise<Tag> {
+    this.takeFailure()
+    const name = input.name.trim()
+    if (!name) throw new Error('标签名称不能为空')
+    if (this.tags.some(t => t.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error(`标签“${name}”已存在`)
+    }
+    if (this.tags.length >= 100) throw new Error('标签数量已达上限（100 个）')
+    const now = Date.now()
+    const tag: Tag = {
+      id: nextId('tag'),
+      name,
+      kind: 'custom',
+      isFallback: false,
+      sortOrder: Math.max(...this.tags.map(t => t.sortOrder), -1) + 1,
+      createdAt: now,
+      updatedAt: now,
+    }
+    this.tags.push(tag)
+    return tag
+  }
+
+  async updateTag(input: UpdateTagInput): Promise<Tag> {
+    this.takeFailure()
+    const tag = this.tags.find(t => t.id === input.id)
+    if (!tag) throw new Error(`tag ${input.id} not found`)
+    if (input.name !== undefined) {
+      const name = input.name.trim()
+      if (this.tags.some(t => t.id !== input.id && t.name.toLowerCase() === name.toLowerCase())) {
+        throw new Error(`标签“${name}”已存在`)
+      }
+      tag.name = name
+      tag.updatedAt = Date.now()
+    }
+    return tag
+  }
+
+  async reorderTag(input: ReorderTagInput): Promise<Tag[]> {
+    this.takeFailure()
+    const sorted = [...this.tags].sort((a, b) => a.sortOrder - b.sortOrder)
+    const index = sorted.findIndex(t => t.id === input.id)
+    const target = index + (input.direction < 0 ? -1 : 1)
+    if (index >= 0 && target >= 0 && target < sorted.length) {
+      const a = sorted[index]
+      const b = sorted[target]
+      const tmp = a.sortOrder
+      a.sortOrder = b.sortOrder
+      b.sortOrder = tmp
+    }
+    return [...this.tags].sort((a, b) => a.sortOrder - b.sortOrder)
+  }
+
+  async previewDeleteTag(id: string): Promise<TagDeletePreview> {
+    this.takeFailure()
+    const tag = this.tags.find(t => t.id === id)
+    if (!tag) throw new Error(`tag ${id} not found`)
+    if (tag.isFallback) throw new Error('保底标签不能删除')
+    return { tagId: id, affectedTasks: this.tasks.filter(t => t.tagId === id).length }
+  }
+
+  async deleteTag(id: string): Promise<DeleteTagResult> {
+    this.takeFailure()
+    const tag = this.tags.find(t => t.id === id)
+    if (!tag) throw new Error(`tag ${id} not found`)
+    if (tag.isFallback) throw new Error('保底标签不能删除')
+    let reassigned = 0
+    for (const task of this.tasks) {
+      if (task.tagId === id) {
+        task.tagId = 'system-other'
+        reassigned += 1
+      }
+    }
+    for (const session of this.sessions) {
+      if (session.tagId === id) session.tagId = null
+    }
+    this.tags = this.tags.filter(t => t.id !== id)
+    return {
+      deletedTagId: id,
+      fallbackTagId: 'system-other',
+      reassignedTasks: reassigned,
+      tags: [...this.tags],
+      tasks: [...this.tasks],
+    }
+  }
+
   async createTask(input: CreateTaskInput): Promise<Task> {
     this.takeFailure()
     const now = Date.now()
@@ -272,6 +377,7 @@ export class FakeAppGateway implements AppGateway {
       pomodoroTarget: input.pomodoroTarget,
       priority: input.priority,
       project: input.project,
+      tagId: 'system-other',
       sortOrder: this.tasks.length,
       createdAt: now,
       updatedAt: now,

@@ -2,6 +2,7 @@ export type TaskPriority = 'high' | 'med' | 'low'
 export type TimerMode = 'focus' | 'short' | 'long'
 export type TimerState = 'idle' | 'running' | 'paused' | 'done'
 export type SessionStatus = 'completed' | 'abandoned'
+export type TagKind = 'system' | 'custom'
 
 export interface Task {
   id: string
@@ -10,6 +11,8 @@ export interface Task {
   pomodoroTarget: number
   priority: TaskPriority
   project: string
+  /** Owning primary tag. v1.1: always present on Rust payloads. */
+  tagId: string
   sortOrder: number
   createdAt: number
   updatedAt: number
@@ -36,6 +39,9 @@ export interface TimerSnapshot {
   selectedTaskId: string | null
   taskTitleSnapshot: string | null
   projectSnapshot: string | null
+  /** Tag frozen when this round started (v1.1). Null while idle. */
+  tagId?: string | null
+  tagNameSnapshot?: string | null
   durationSeconds: number
   remainingSeconds: number
   startedAt: number | null
@@ -50,12 +56,58 @@ export interface TimerSession {
   taskId: string | null
   taskTitleSnapshot: string
   projectSnapshot: string
+  /** v1.1 tag snapshot fields — absent on old persisted payloads/tests. */
+  tagId?: string | null
+  tagNameSnapshot?: string
   mode: TimerMode
   status: SessionStatus
   plannedSeconds: number
   focusedSeconds: number
   startedAt: number
   endedAt: number
+  finishReason?: string
+  statisticsEligible?: boolean
+  qualificationReason?: string
+}
+
+// ─── Tags (v1.1) ─────────────────────────────────────────────────────────────
+
+export interface Tag {
+  id: string
+  name: string
+  kind: TagKind
+  isFallback: boolean
+  sortOrder: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface CreateTagInput {
+  name: string
+}
+
+export interface UpdateTagInput {
+  id: string
+  name?: string
+}
+
+export interface ReorderTagInput {
+  id: string
+  /** -1 moves one slot up (earlier), +1 one slot down (later). */
+  direction: number
+}
+
+export interface TagDeletePreview {
+  tagId: string
+  affectedTasks: number
+}
+
+export interface DeleteTagResult {
+  deletedTagId: string
+  fallbackTagId: string
+  reassignedTasks: number
+  tags: Tag[]
+  tasks: Task[]
 }
 
 export interface StatisticsDayBoundary {
@@ -132,6 +184,7 @@ export interface StatisticsQuery {
 
 export interface BootstrapPayload {
   tasks: Task[]
+  tags: Tag[]
   settings: AppSettings
   timer: TimerSnapshot
   sessions: TimerSession[]

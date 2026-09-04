@@ -7,20 +7,26 @@ import type {
   BootstrapPayload,
   CompleteTimerInput,
   CompleteTimerResult,
+  CreateTagInput,
   CreateTaskInput,
+  DeleteTagResult,
   ExportSummary,
   ImportPreview,
   ImportSummary,
+  ReorderTagInput,
   SaveSettingsResult,
   SessionQuery,
   StartTimerInput,
   Statistics,
   StatisticsQuery,
   SwitchTimerModeInput,
+  Tag,
+  TagDeletePreview,
   Task,
   TimerRevisionInput,
   TimerSession,
   TimerSnapshot,
+  UpdateTagInput,
   UpdateTaskInput,
 } from '../domain/models'
 import type { TrayAction, TrayIndicator, TimerExpiredPayload } from '../domain/tray'
@@ -36,6 +42,15 @@ export class TauriAppGateway implements AppGateway {
   createTask(input: CreateTaskInput) { return invoke<Task>('create_task', { input }) }
   updateTask(input: UpdateTaskInput) { return invoke<Task>('update_task', { input }) }
   deleteTask(id: string) { return invoke<void>('delete_task', { id }) }
+
+  // ─── Tags (v1.1) ──────────────────────────────────────────────────────────
+  listTags() { return invoke<Tag[]>('list_tags') }
+  createTag(input: CreateTagInput) { return invoke<Tag>('create_tag', { input }) }
+  updateTag(input: UpdateTagInput) { return invoke<Tag>('update_tag', { input }) }
+  reorderTag(input: ReorderTagInput) { return invoke<Tag[]>('reorder_tag', { input }) }
+  previewDeleteTag(id: string) { return invoke<TagDeletePreview>('preview_delete_tag', { id }) }
+  deleteTag(id: string) { return invoke<DeleteTagResult>('delete_tag', { id }) }
+
   saveSettings(input: AppSettings) { return invoke<SaveSettingsResult>('save_settings', { input }) }
   listSessions(query: SessionQuery) { return invoke<TimerSession[]>('list_sessions', { query }) }
   getStatistics(query: StatisticsQuery) { return invoke<Statistics>('get_statistics', { query }) }

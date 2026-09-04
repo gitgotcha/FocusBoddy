@@ -8,10 +8,11 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::error::CommandError;
 use crate::models::{
-    AppSettings, BootstrapPayload, CompleteTimerInput, CompleteTimerResult, CreateTaskInput,
-    ExportBundle, ExportSummary, ImportPreview, ImportSummary, SaveSettingsResult, SessionQuery,
-    StartTimerInput, Statistics, StatisticsQuery, SwitchTimerModeInput, Task, TimerRevisionInput,
-    TimerSession, TimerSnapshot, UpdateTaskInput,
+    AppSettings, BootstrapPayload, CompleteTimerInput, CompleteTimerResult, CreateTagInput,
+    CreateTaskInput, DeleteTagResult, ExportBundle, ExportSummary, ImportPreview, ImportSummary,
+    SaveSettingsResult, SessionQuery, StartTimerInput, Statistics, StatisticsQuery,
+    SwitchTimerModeInput, Tag, TagDeletePreview, Task, TimerRevisionInput, TimerSession,
+    TimerSnapshot, UpdateTagInput, UpdateTaskInput,
 };
 use crate::repository;
 use crate::AppState;
@@ -32,11 +33,59 @@ pub fn bootstrap_app(state: State<'_, AppState>) -> Result<BootstrapPayload, Com
 
     Ok(BootstrapPayload {
         tasks: repository::list_tasks(&conn)?,
+        tags: repository::list_tags(&conn)?,
         settings: repository::get_settings(&conn)?,
         timer: repository::get_timer(&conn)?,
         sessions: repository::list_sessions(&conn, BOOTSTRAP_SESSION_LIMIT)?,
         statistics: repository::all_time_statistics(&conn)?,
     })
+}
+
+// ─── Tags (v1.1) ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_tags(state: State<'_, AppState>) -> Result<Vec<Tag>, CommandError> {
+    let conn = lock_db(&state)?;
+    repository::list_tags(&conn)
+}
+
+#[tauri::command]
+pub fn create_tag(state: State<'_, AppState>, input: CreateTagInput) -> Result<Tag, CommandError> {
+    let conn = lock_db(&state)?;
+    repository::create_tag(&conn, &input)
+}
+
+#[tauri::command]
+pub fn update_tag(state: State<'_, AppState>, input: UpdateTagInput) -> Result<Tag, CommandError> {
+    let conn = lock_db(&state)?;
+    repository::update_tag(&conn, &input)
+}
+
+#[tauri::command]
+pub fn reorder_tag(
+    state: State<'_, AppState>,
+    input: crate::models::ReorderTagInput,
+) -> Result<Vec<Tag>, CommandError> {
+    let conn = lock_db(&state)?;
+    repository::reorder_tag(&conn, &input)
+}
+
+#[tauri::command]
+pub fn preview_delete_tag(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<TagDeletePreview, CommandError> {
+    let conn = lock_db(&state)?;
+    repository::preview_delete_tag(&conn, &id)
+}
+
+#[tauri::command]
+pub fn delete_tag(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DeleteTagResult, CommandError> {
+    let mut conn = lock_db(&state)?;
+    repository::delete_tag(&mut conn, &id)
 }
 
 #[tauri::command]
