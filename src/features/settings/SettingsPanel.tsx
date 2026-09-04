@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { HorizonDivider } from "../timer/GoalRing";
 import type { AppSettings, ImportPreview } from "../../domain/models";
 import { C, CARD } from "../shared/palette";
+import { DurationStepper } from "./DurationStepper";
 import { useAppGateway } from "../../services/gatewayContext";
 import { chineseDate } from "../shared/format";
 
@@ -13,18 +14,34 @@ export function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
   const gateway = useAppGateway();
   const [draft, setDraft] = useState<AppSettings | null>(settings);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Sync from the latest persisted settings when they change externally.
   useEffect(() => { setDraft(settings); }, [settings]);
 
-  // Persist whenever the draft diverges from the persisted copy.
-  const persist = useCallback(async (next: AppSettings) => {
+  // Latest persisted settings, readable inside the serial save queue.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  // v1.1 §11.1 (review suggestion 9): saves run through a serial queue so a
+  // slow earlier request can never overwrite a newer one (latest-write-wins
+  // by ordering). A failed save restores the last persisted values.
+  const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const persist = useCallback((next: AppSettings) => {
     setSaving(true);
-    try {
-      await onSaveSettings(next);
-    } finally {
-      setSaving(false);
-    }
+    const run = saveQueueRef.current.then(async () => {
+      try {
+        await onSaveSettings(next);
+        setSaveError(null);
+      } catch {
+        setDraft(settingsRef.current);
+        setSaveError("保存失败，已恢复上次保存的设置");
+      } finally {
+        setSaving(false);
+      }
+    });
+    saveQueueRef.current = run;
+    return run;
   }, [onSaveSettings]);
 
   const update = useCallback((patch: Partial<AppSettings>) => {
@@ -152,26 +169,6 @@ export function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
     </button>
   );
 
-  const Stepper = ({ value, onChange, min, max }:
-    { value: number; onChange: (v: number) => void; min: number; max: number }) => (
-    <div style={{ display:"flex", alignItems:"center", gap:5 }}>
-      <button onClick={() => onChange(Math.max(min, value-1))} className="btn-number"
-        style={{
-          width:24, height:24, borderRadius:6,
-          background:C.cardDim, border:`1px solid ${C.hairline}`,
-          color:C.textSec, cursor:"pointer", fontSize:13,
-          display:"flex", alignItems:"center", justifyContent:"center",
-        }}>–</button>
-      <span style={{ width:30, textAlign:"center", fontFamily:"var(--font-mono)", fontSize:12, fontVariantNumeric:"tabular-nums", color:C.textPrimary }}>{value}</span>
-      <button onClick={() => onChange(Math.min(max, value+1))} className="btn-number"
-        style={{
-          width:24, height:24, borderRadius:6,
-          background:C.cardDim, border:`1px solid ${C.hairline}`,
-          color:C.textSec, cursor:"pointer", fontSize:13,
-          display:"flex", alignItems:"center", justifyContent:"center",
-        }}>+</button>
-    </div>
-  );
 
   const Section = ({ label, children }: { label: string; children: React.ReactNode }) => (
     <div style={{ marginBottom:9 }}>
@@ -234,9 +231,9 @@ export function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
       </div>
       <div className="flex-1 overflow-y-auto" style={{ padding:"4px 22px" }}>
         <Section label="时长（分钟）">
-          <Row label="专注"><Stepper value={draft.focusDurationMinutes} onChange={v => update({ focusDurationMinutes: v })} min={1} max={180} /></Row>
-          <Row label="短休"><Stepper value={draft.shortBreakMinutes} onChange={v => update({ shortBreakMinutes: v })} min={1} max={180} /></Row>
-          <Row label="长休" last><Stepper value={draft.longBreakMinutes} onChange={v => update({ longBreakMinutes: v })} min={1} max={180} /></Row>
+          <Row label="专注"><DurationStepper value={draft.focusDurationMinutes} onChange={v => update({ focusDurationMinutes: v })} min={1} max={180} ariaLabel="专注时长" errorMessage="请输入 1–180 的整数分钟" /></Row>
+          <Row label="短休"><DurationStepper value={draft.shortBreakMinutes} onChange={v => update({ shortBreakMinutes: v })} min={1} max={180} ariaLabel="短休时长" errorMessage="请输入 1–180 的整数分钟" /></Row>
+          <Row label="长休" last><DurationStepper value={draft.longBreakMinutes} onChange={v => update({ longBreakMinutes: v })} min={1} max={180} ariaLabel="长休时长" errorMessage="请输入 1–180 的整数分钟" /></Row>
         </Section>
         <Section label="行为">
           <Row label="自动开始休息" hint="专注结束后自动继续"><Toggle label="自动开始休息" value={draft.autoStartBreak} onChange={v => update({ autoStartBreak: v })} /></Row>
@@ -245,7 +242,7 @@ export function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
           <Row label="降低动态效果" hint="暂停海洋背景动画，降低 CPU 与电量消耗" last><Toggle label="降低动态效果" value={draft.reduceMotion} onChange={v => update({ reduceMotion: v })} /></Row>
         </Section>
         <Section label="目标">
-          <Row label="每日专注次数" last><Stepper value={draft.dailyGoal} onChange={v => update({ dailyGoal: v })} min={1} max={50} /></Row>
+          <Row label="每日专注次数" last><DurationStepper value={draft.dailyGoal} onChange={v => update({ dailyGoal: v })} min={1} max={50} ariaLabel="每日专注次数" /></Row>
         </Section>
         <Section label="系统">
           <Row label="开机自动启动" hint="登录 Windows 后于后台自动运行"><Toggle label="开机自动启动" value={launchAtLogin ?? false} onChange={toggleLaunchAtLogin} /></Row>

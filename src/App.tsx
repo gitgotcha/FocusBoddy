@@ -433,8 +433,9 @@ export default function App() {
   const saveSettings = useCallback(async (next: AppSettings) => {
     const result = await gateway.saveSettings(next);
     setSettings(result.settings);
+    applyTimer(result.timer); // idle/done timers pick up new durations at once
     refreshStats(); // dailyGoal is baked into the statistics payload
-  }, [gateway, refreshStats]);
+  }, [gateway, applyTimer, refreshStats]);
 
   const createTask = useCallback(async (title: string) => {
     const task = await gateway.createTask({
