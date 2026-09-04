@@ -47,6 +47,29 @@ body,
 
 * { box-sizing: border-box; }
 
+/* ── Focus discipline (Round 5) ─────────────────────────────────────
+   Mouse clicks never show a ring; keyboard focus always does. The
+   per-control :focus-visible rules below keep their own accents — this
+   global pair guarantees a visible ring even for controls that only
+   carry inline styles (ActionButton, Stepper, Toggle, …). */
+button:focus { outline: none; }
+button:focus-visible {
+  outline: 1.5px solid rgba(158, 173, 178, 0.40);
+  outline-offset: 2px;
+}
+
+/* ── Disabled states — uniform across every control ──────────────── */
+.nav-btn:disabled, .btn-ctrl:disabled, .btn-main:disabled, .btn-add:disabled,
+.btn-delete:disabled, .btn-filter:disabled, .btn-mode:disabled,
+.btn-number:disabled, .btn-toggle:disabled, .btn-check:disabled,
+.btn-action:disabled {
+  opacity: 0.38;
+  /* also suppresses hover/active feedback on dead controls */
+  pointer-events: none;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
 /* ── Scrollbar ──────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -146,6 +169,7 @@ body {
   border-color: rgba(175, 148, 158, 0.20) !important;
   background: rgba(175, 148, 158, 0.05) !important;
 }
+.btn-delete:active { transform: scale(0.96); }
 .btn-delete:focus-visible {
   outline: 1.5px solid rgba(175, 148, 158, 0.38);
   outline-offset: 2px;
@@ -176,6 +200,7 @@ body {
   border-color: rgba(180, 199, 202, 0.16) !important;
   background: rgba(27, 37, 44, 0.30) !important;
 }
+.btn-filter:active { transform: scale(0.96); }
 .btn-filter:focus-visible {
   outline: 1.5px solid rgba(158, 173, 178, 0.36);
   outline-offset: 2px;
@@ -190,6 +215,7 @@ body {
   background: rgba(27, 37, 44, 0.35) !important;
   border-color: rgba(180, 199, 202, 0.14) !important;
 }
+.btn-mode:active { transform: scale(0.96); }
 .btn-mode:focus-visible {
   outline: 1.5px solid rgba(158, 173, 178, 0.36);
   outline-offset: 2px;
@@ -223,6 +249,7 @@ body {
   border-color: rgba(158, 173, 178, 0.42) !important;
   background: rgba(27, 37, 44, 0.24) !important;
 }
+.btn-check:active { transform: scale(0.94); }
 .btn-check:focus-visible {
   outline: 1.5px solid rgba(158, 173, 178, 0.38);
   outline-offset: 2px;
@@ -240,6 +267,10 @@ body {
 /* ── Settings rows ───────────────────────────────────────────────── */
 .settings-row { border-bottom: 0.5px solid rgba(180, 199, 202, 0.06); }
 .settings-row:last-of-type { border-bottom: none; }
+
+/* ── Data-section action buttons (inline-styled in App.tsx) ──────── */
+.btn-action { transition: all 0.18s; }
+.btn-action:active { transform: scale(0.96); }
 
 /* ── Card shimmer ────────────────────────────────────────────────── */
 .card-shimmer {

@@ -331,7 +331,7 @@ function Sidebar({ active, onNav }: { active: NavSection; onNav: (s: NavSection)
                 color: isActive ? "#FFFFFF" : "rgba(220, 232, 236, 0.70)",
                 border: `0.5px solid ${isActive ? "rgba(255,255,255,0.22)" : "transparent"}`,
                 cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
-                outline: "none",
+                /* focus rings come from index.css (:focus / :focus-visible) */
                 textShadow: isActive ? "0 1px 4px rgba(0,0,0,0.5)" : "none",
               }}>
               {item.icon}
@@ -530,7 +530,7 @@ function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, onSwitc
     backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
     border: `1px solid ${C.hairline}`,
     color: C.textMuted, cursor: "pointer",
-    display: "flex", alignItems: "center", justifyContent: "center", outline: "none",
+    display: "flex", alignItems: "center", justifyContent: "center", /* focus rings come from index.css (:focus / :focus-visible) */
   };
 
   return (
@@ -548,7 +548,7 @@ function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, onSwitc
                 border: `0.5px solid ${mode === md ? C.hairlineStr : "transparent"}`,
                 background: mode === md ? "rgba(27,37,44,0.38)" : "transparent",
                 color: mode === md ? C.moonlight : C.textMuted,
-                cursor: "pointer", outline: "none",
+                cursor: "pointer", /* focus rings come from index.css (:focus / :focus-visible) */
               }}>
               {MODE_LABELS[md]}
             </button>
@@ -631,7 +631,7 @@ function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, onSwitc
                 border: `1px solid rgba(215,228,230,0.12)`,
                 boxShadow: "inset 0 1px 0 rgba(215,228,230,0.07), 0 0 18px rgba(158,173,178,0.06), 0 4px 16px rgba(2,3,5,0.28)",
                 color: C.moonlight, cursor: "pointer",
-                display: "flex", alignItems: "center", justifyContent: "center", outline: "none",
+                display: "flex", alignItems: "center", justifyContent: "center", /* focus rings come from index.css (:focus / :focus-visible) */
               }}>
               <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
                 <rect x="4" y="3" width="3.5" height="12" rx="1.2" fill="currentColor" />
@@ -647,7 +647,7 @@ function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, onSwitc
                 border: `1px solid rgba(215,228,230,0.12)`,
                 boxShadow: "inset 0 1px 0 rgba(215,228,230,0.07), 0 0 22px rgba(158,173,178,0.08), 0 4px 16px rgba(2,3,5,0.28)",
                 color: C.moonlight, cursor: "pointer",
-                display: "flex", alignItems: "center", justifyContent: "center", outline: "none",
+                display: "flex", alignItems: "center", justifyContent: "center", /* focus rings come from index.css (:focus / :focus-visible) */
               }}>
               {state === "done" ? (
                 <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
@@ -699,7 +699,7 @@ function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, onSwitc
                         border: `1px solid ${sel ? C.hairlineStr : C.hairline}`,
                         color: sel ? C.moonlight : C.textSec,
                         fontSize: 12, fontFamily: "var(--font-sans)",
-                        textAlign: "left", cursor: "pointer", outline: "none",
+                        textAlign: "left", cursor: "pointer", /* focus rings come from index.css (:focus / :focus-visible) */
                         display: "flex", alignItems: "center", gap: 7,
                       }}>
                       {sel && (
@@ -777,7 +777,7 @@ function TasksPanel({ tasks, onCreateTask, onToggleTask, onDeleteTask, onCyclePr
                   border: `0.5px solid ${filter===f ? C.hairlineStr : "transparent"}`,
                   background: filter===f ? "rgba(27,37,44,0.38)" : "transparent",
                   color: filter===f ? C.moonlight : C.textMuted,
-                  cursor: "pointer", outline: "none",
+                  cursor: "pointer", /* focus rings come from index.css (:focus / :focus-visible) */
                 }}>{fLabels[f]}</button>
             ))}
           </div>
@@ -800,7 +800,7 @@ function TasksPanel({ tasks, onCreateTask, onToggleTask, onDeleteTask, onCyclePr
               backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
               border: `1px solid ${C.hairlineStr}`,
               color: C.moonlight, cursor: "pointer",
-              display: "flex", alignItems: "center", justifyContent: "center", outline: "none",
+              display: "flex", alignItems: "center", justifyContent: "center", /* focus rings come from index.css (:focus / :focus-visible) */
             }}>
             <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
               <path d="M7 2V12M2 7H12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -833,7 +833,7 @@ function TasksPanel({ tasks, onCreateTask, onToggleTask, onDeleteTask, onCyclePr
                     width:15, height:15, borderRadius:5, flexShrink:0,
                     border:`1.5px solid ${task.done ? C.silver : "rgba(215,228,230,0.14)"}`,
                     background: task.done ? "rgba(158,173,178,0.10)" : "transparent",
-                    cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", outline:"none",
+                    cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center",
                   }}>
                   {task.done && (
                     <svg width="7" height="7" viewBox="0 0 9 9" fill="none">
@@ -865,7 +865,7 @@ function TasksPanel({ tasks, onCreateTask, onToggleTask, onDeleteTask, onCyclePr
                     width:20, height:20, borderRadius:4, flexShrink:0,
                     background:"none", border:"1px solid transparent",
                     color:"rgba(215,228,230,0.14)", cursor:"pointer",
-                    display:"flex", alignItems:"center", justifyContent:"center", outline:"none",
+                    display:"flex", alignItems:"center", justifyContent:"center",
                   }}>
                   <svg width="8" height="8" viewBox="0 0 10 10" fill="none">
                     <path d="M2 2L8 8M8 2L2 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
@@ -1010,14 +1010,14 @@ function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
     setPendingImportPath(null);
   }, []);
 
-  const Toggle = ({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) => (
+  const Toggle = ({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label: string }) => (
     <button onClick={() => onChange(!value)} className="btn-toggle"
-      role="switch" aria-checked={value}
+      role="switch" aria-checked={value} aria-label={label}
       style={{
         width:34, height:19, borderRadius:10, flexShrink:0,
         background: value ? "rgba(27,37,44,0.50)" : "rgba(8,13,18,0.24)",
         border:`1px solid ${value ? C.hairlineStr : C.hairline}`,
-        position:"relative", cursor:"pointer", outline:"none",
+        position:"relative", cursor:"pointer",
       }}>
       <span style={{
         position:"absolute", top:3, left: value ? 16 : 3,
@@ -1036,7 +1036,7 @@ function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
           width:24, height:24, borderRadius:6,
           background:C.cardDim, border:`1px solid ${C.hairline}`,
           color:C.textSec, cursor:"pointer", fontSize:13,
-          display:"flex", alignItems:"center", justifyContent:"center", outline:"none",
+          display:"flex", alignItems:"center", justifyContent:"center",
         }}>–</button>
       <span style={{ width:30, textAlign:"center", fontFamily:"var(--font-mono)", fontSize:12, fontVariantNumeric:"tabular-nums", color:C.textPrimary }}>{value}</span>
       <button onClick={() => onChange(Math.min(max, value+1))} className="btn-number"
@@ -1044,7 +1044,7 @@ function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
           width:24, height:24, borderRadius:6,
           background:C.cardDim, border:`1px solid ${C.hairline}`,
           color:C.textSec, cursor:"pointer", fontSize:13,
-          display:"flex", alignItems:"center", justifyContent:"center", outline:"none",
+          display:"flex", alignItems:"center", justifyContent:"center",
         }}>+</button>
     </div>
   );
@@ -1075,7 +1075,7 @@ function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
     <button onClick={onClick} disabled={disabled} className="btn-action"
       style={{
         padding:"5px 14px", borderRadius:7, fontSize:11, fontFamily:"var(--font-sans)",
-        cursor: disabled ? "default" : "pointer", outline:"none",
+        cursor: disabled ? "default" : "pointer",
         color: danger ? "rgba(231,138,138,0.95)" : C.textPrimary,
         background: danger ? "rgba(231,138,138,0.10)" : C.cardDim,
         border:`1px solid ${danger ? "rgba(231,138,138,0.30)" : C.hairline}`,
@@ -1115,16 +1115,16 @@ function SettingsPanel({ settings, onSaveSettings, onDataChanged }: {
           <Row label="长休" last><Stepper value={draft.longBreakMinutes} onChange={v => update({ longBreakMinutes: v })} min={1} max={180} /></Row>
         </Section>
         <Section label="行为">
-          <Row label="自动开始休息" hint="专注结束后自动继续"><Toggle value={draft.autoStartBreak} onChange={v => update({ autoStartBreak: v })} /></Row>
-          <Row label="声音提示"><Toggle value={draft.soundEnabled} onChange={v => update({ soundEnabled: v })} /></Row>
-          <Row label="桌面通知"><Toggle value={draft.notificationEnabled} onChange={v => update({ notificationEnabled: v })} /></Row>
-          <Row label="降低动态效果" hint="暂停海洋背景动画，降低 CPU 与电量消耗" last><Toggle value={draft.reduceMotion} onChange={v => update({ reduceMotion: v })} /></Row>
+          <Row label="自动开始休息" hint="专注结束后自动继续"><Toggle label="自动开始休息" value={draft.autoStartBreak} onChange={v => update({ autoStartBreak: v })} /></Row>
+          <Row label="声音提示"><Toggle label="声音提示" value={draft.soundEnabled} onChange={v => update({ soundEnabled: v })} /></Row>
+          <Row label="桌面通知"><Toggle label="桌面通知" value={draft.notificationEnabled} onChange={v => update({ notificationEnabled: v })} /></Row>
+          <Row label="降低动态效果" hint="暂停海洋背景动画，降低 CPU 与电量消耗" last><Toggle label="降低动态效果" value={draft.reduceMotion} onChange={v => update({ reduceMotion: v })} /></Row>
         </Section>
         <Section label="目标">
           <Row label="每日专注次数" last><Stepper value={draft.dailyGoal} onChange={v => update({ dailyGoal: v })} min={1} max={50} /></Row>
         </Section>
         <Section label="系统">
-          <Row label="开机自动启动" hint="登录 Windows 后于后台自动运行"><Toggle value={launchAtLogin ?? false} onChange={toggleLaunchAtLogin} /></Row>
+          <Row label="开机自动启动" hint="登录 Windows 后于后台自动运行"><Toggle label="开机自动启动" value={launchAtLogin ?? false} onChange={toggleLaunchAtLogin} /></Row>
           <Row label="全局快捷键" hint="Ctrl + Alt + 空格：开始 / 暂停（窗口隐藏时也能用）" last><span style={{ fontFamily:"var(--font-mono)", fontSize:10, color:C.textMuted }}>Ctrl+Alt+Space</span></Row>
         </Section>
         <Section label="数据">

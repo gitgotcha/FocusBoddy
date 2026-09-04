@@ -15,8 +15,8 @@
 |------|------|------|------|------|----------|
 | R1-01 | Round 1 | P0/P1 | 托盘“彻底退出”时若正在计时，未保存剩余时间，下次启动会被后台 ticker 自动完成，悄悄消耗专注时间 | ✅ 已修复 | `6042665` |
 | R1-02 | Round 1 | P1 | 全局快捷键被其它程序占用时，`build()` 返回错误导致启动崩溃（`.run().expect()` panic） | ✅ 已修复 | `03917e2` |
-| R1-03 | Round 4 | P2 | 缺少“降低动态效果”开关；视频在失焦/最小化时未降开销 | ✅ 已修复 | 本轮提交 |
-| R1-04 | Round 4 | P1 | 视频加载失败时可能黑屏，需回退 `ocean-poster` | ✅ 已修复 | 本轮提交 |
+| R1-03 | Round 4 | P2 | 缺少“降低动态效果”开关；视频在失焦/最小化时未降开销 | ✅ 已修复 | `c2e4bc2` |
+| R1-04 | Round 4 | P1 | 视频加载失败时可能黑屏，需回退 `ocean-poster` | ✅ 已修复 | `c2e4bc2` |
 | R1-05 | Round 2 | P1 | 升级/卸载时用户数据保留说明缺失 | ✅ 已说明（见「数据保留」） | `01c3afc` |
 
 ---
@@ -116,7 +116,7 @@
 ---
 
 ## Round 4 — 离线资源与性能（P1/P2）✅
-**验收 EXE**：`src-tauri/target/release/abyssal-reverie.exe`（本轮提交）
+**验收 EXE**：`src-tauri/target/release/abyssal-reverie.exe`（提交 `c2e4bc2`）
 
 ### 本轮修复
 - **R1-04（P1）视频失败回退**：`OceanVideo` 增加错误态——`<video>` `onError` 后切换为以 `ocean-poster.jpg` 为背景的等价层（同一滤镜/暗角），任何加载失败都不会黑屏（父级深色底 + poster 双保险）。
@@ -143,6 +143,30 @@
 
 ## Round 5 — UI 与交互一致性（P2）⏳ 规划中
 - 间距/比例统一；玻璃质感统一；海洋背景全屏无接缝；缩放不溢出；动态背景对比度；hover/focus/active/disabled；等宽数字不抖动；100–200% DPI；键盘可操作。
+
+## Round 5 — UI 与交互一致性（P2）✅
+**验收 EXE**：`src-tauri/target/release/abyssal-reverie.exe`（本轮提交）
+
+### 本轮修复
+- **键盘焦点环被内联样式压制（真实缺陷）**：`Toggle`/`Stepper`/`ActionButton` 等 14 处按钮带内联 `outline:"none"`，内联优先级高于类上的 `:focus-visible`，键盘用户完全看不到焦点位置。修复：
+  - 移除全部 14 处内联 `outline:"none"`；
+  - `index.css` 增加全局焦点纪律：`button:focus { outline:none }`（鼠标点击无环）+ `button:focus-visible { 1.5px 环 }`（键盘焦点必有环），各控件类自有的 `:focus-visible` 保持其专属色。
+- **统一 `:disabled` 状态**：此前无任何禁用样式规则。新增统一规则（11 个控件类）：`opacity 0.38` + `pointer-events:none`（同时抑制禁用件上的 hover/active 反馈）+ 清除 transform/shadow。
+- **补齐缺失 `:active`**：`btn-delete/btn-filter/btn-mode/btn-check/btn-action` 此前无按压反馈，统一加 `scale(0.94~0.96)`。
+- **屏幕阅读器可达**：`Toggle` 增加 `label` prop → `aria-label`（5 处调用点全部标注），配合既有 `role="switch" aria-checked`。
+
+### 审计确认（已达标项）
+- **玻璃质感统一**：全部卡片经 `--color-card/-bright/-dim` 令牌 + `card-shimmer` 阴影，无散落值。
+- **等宽数字不抖动**：计时器/统计数字均 `font-variant-numeric: tabular-nums`（font-display）或 DM Mono。
+- **海洋背景全屏无接缝**：`position:fixed inset:0 object-fit:cover` 单一全局视频层。
+- **缩放/DPI**：flex/grid + `clamp()` 布局，窗口最小 1024×700，768px 断点隐藏右栏；100–200% DPI 需实机确认。
+- **动态背景对比度**：文本令牌 0.92/0.62/0.42 三级透明度 + 分层暗角，白字带 textShadow。
+- **键盘可操作**：全部交互件为真实 `<button>`（Enter/Space 原生触发）+ 统一焦点环。
+
+### 测试与构建验证
+`tsc` 干净；`vitest` **17 passed**（CSS/TSX 改动不影响 Rust 层，cargo 套件维持 63 passed）；真实 EXE 重建。
+
+---
 
 ## Round 6 — 最终安装包回归 + 交付物 ⏳ 规划中
 - Win10/11；全新/覆盖/卸载/重装；1366×768–2K；单/双显示器；在线/离线；中文/空格/非系统盘；开始菜单/桌面/自启启动；连续/托盘/休眠/异常。
