@@ -4,8 +4,9 @@ use uuid::Uuid;
 use crate::error::CommandError;
 use crate::models::{
     AppSettings, CompleteTimerInput, CompleteTimerResult, CreateTagInput, CreateTaskInput, DayStat,
-    DeleteTagResult, ExportBundle, FinishTimerInput, FinishTimerResult, ImportSummary, ProjectStat,
-    SaveSettingsResult, SessionQuery, SessionStatus, StartTimerInput, Statistics,
+    BackupHeader, DeleteTagResult, ExportBundle, ExportBundleV1, FinishTimerInput,
+    FinishTimerResult, ImportPreview, ImportSummary, ProjectStat,
+    SaveSettingsResult, SessionQuery, SessionStatus, SessionV1, StartTimerInput, Statistics,
     StatisticsQuery, SwitchTimerModeInput, Tag, TagDeletePreview, TagKind, Task, TaskPriority,
     TimerMode, TimerSession, TimerSnapshot, TimerState, UpdateTagInput, UpdateTaskInput,
 };
@@ -35,7 +36,7 @@ pub const MAX_DAILY_GOAL: i64 = 50;
 
 /// Backup bundle identity + version (Item 3: data export & backup).
 pub const EXPORT_APP_NAME: &str = "abyssal-reverie";
-pub const EXPORT_SCHEMA_VERSION: u32 = 1;
+pub const EXPORT_SCHEMA_VERSION: u32 = 2;
 
 const TASK_COLUMNS: &str = "id, title, done, pomodoro_target, priority, project, tag_id, \
                             sort_order, created_at, updated_at, completed_at";
@@ -1704,9 +1705,115 @@ pub fn export_data(conn: &Connection) -> Result<ExportBundle, CommandError> {
         schema_version: EXPORT_SCHEMA_VERSION,
         exported_at: now_millis(),
         settings: get_settings(conn)?,
+        tags: list_tags(conn)?,
         tasks: list_tasks(conn)?,
         sessions: list_all_sessions(conn)?,
     })
+}
+
+/// The four system tags as they would exist in the database. Used to upgrade
+/// v1 backups (which have no tags at all).
+fn default_tags(now: i64) -> Vec<Tag> {
+    vec![
+        Tag { id: "system-study".into(), name: "学习".into(), kind: TagKind::System, is_fallback: false, sort_order: 0, created_at: now, updated_at: now },
+        Tag { id: "system-work".into(), name: "工作".into(), kind: TagKind::System, is_fallback: false, sort_order: 1, created_at: now, updated_at: now },
+        Tag { id: "system-life".into(), name: "生活".into(), kind: TagKind::System, is_fallback: false, sort_order: 2, created_at: now, updated_at: now },
+        Tag { id: "system-other".into(), name: "其他".into(), kind: TagKind::System, is_fallback: true, sort_order: 3, created_at: now, updated_at: now },
+    ]
+}
+
+/// Upgrades a v1.0.0 backup to the v2 bundle shape: seeds the four default
+/// tags, moves every task to the fallback tag, and backfills session
+/// qualification per the §7.3 rules (finish_reason = "legacy").
+fn normalize_v1_bundle(v1: ExportBundleV1) -> ExportBundle {
+    let now = if v1.exported_at > 0 { v1.exported_at } else { now_millis() };
+    let tags = default_tags(now);
+
+    let tasks = v1
+        .tasks
+        .into_iter()
+        .map(|t| Task {
+            id: t.id,
+            title: t.title,
+            done: t.done,
+            pomodoro_target: t.pomodoro_target,
+            priority: t.priority,
+            project: t.project,
+            tag_id: crate::models::FALLBACK_TAG_ID.to_owned(),
+            sort_order: t.sort_order,
+            created_at: t.created_at,
+            updated_at: t.updated_at,
+            completed_at: t.completed_at,
+        })
+        .collect();
+
+    let sessions = v1
+        .sessions
+        .into_iter()
+        .map(|session| {
+            let probe = TimerSession {
+                id: session.id,
+                task_id: session.task_id,
+                task_title_snapshot: session.task_title_snapshot,
+                project_snapshot: session.project_snapshot,
+                tag_id: None,
+                tag_name_snapshot: None,
+                mode: session.mode,
+                status: session.status,
+                planned_seconds: session.planned_seconds,
+                focused_seconds: session.focused_seconds,
+                started_at: session.started_at,
+                ended_at: session.ended_at,
+                finish_reason: None,
+                statistics_eligible: None,
+                qualification_reason: None,
+            };
+            let (finish, eligible, qualification) = effective_qualification(&probe);
+            TimerSession {
+                tag_id: Some(crate::models::FALLBACK_TAG_ID.to_owned()),
+                tag_name_snapshot: Some("其他".to_owned()),
+                finish_reason: Some(finish),
+                statistics_eligible: Some(eligible != 0),
+                qualification_reason: Some(qualification),
+                ..probe
+            }
+        })
+        .collect();
+
+    ExportBundle {
+        app: v1.app,
+        schema_version: EXPORT_SCHEMA_VERSION,
+        exported_at: v1.exported_at,
+        settings: v1.settings,
+        tags,
+        tasks,
+        sessions,
+    }
+}
+
+/// Version-header-first backup parsing (v1.1 review): read `app` +
+/// `schema_version`, then hand the payload to the matching DTO. A v1 backup
+/// is upgraded to the v2 bundle shape; anything else is rejected.
+pub fn parse_backup_text(text: &str) -> Result<ExportBundle, CommandError> {
+    let header: BackupHeader = serde_json::from_str(text)
+        .map_err(|err| CommandError::validation(format!("备份文件格式无效: {err}")))?;
+
+    if header.app != EXPORT_APP_NAME {
+        return Err(CommandError::validation("文件不是 Abyssal Reverie 备份"));
+    }
+
+    match header.schema_version {
+        1 => {
+            let v1: ExportBundleV1 = serde_json::from_str(text)
+                .map_err(|err| CommandError::validation(format!("v1 备份解析失败: {err}")))?;
+            Ok(normalize_v1_bundle(v1))
+        }
+        2 => serde_json::from_str::<ExportBundle>(text)
+            .map_err(|err| CommandError::validation(format!("v2 备份解析失败: {err}"))),
+        other => Err(CommandError::validation(format!(
+            "备份版本 {other} 不受支持（当前最高 {EXPORT_SCHEMA_VERSION}）"
+        ))),
+    }
 }
 
 /// Full listing without the activity-visibility filter (exports/backups).
@@ -1719,15 +1826,44 @@ fn list_all_sessions(conn: &Connection) -> Result<Vec<TimerSession>, CommandErro
 }
 
 /// Validates a parsed backup bundle before it touches the database.
+/// Row counts shown to the user before a destructive import is confirmed.
+pub fn preview_from_bundle(bundle: &ExportBundle) -> ImportPreview {
+    ImportPreview {
+        schema_version: bundle.schema_version,
+        tags: bundle.tags.len() as i64,
+        tasks: bundle.tasks.len() as i64,
+        sessions: bundle.sessions.len() as i64,
+    }
+}
+
 pub fn validate_import(bundle: &ExportBundle) -> Result<(), CommandError> {
     if bundle.app != EXPORT_APP_NAME {
         return Err(CommandError::validation("文件不是 Abyssal Reverie 备份"));
     }
-    if bundle.schema_version > EXPORT_SCHEMA_VERSION {
+    if bundle.schema_version == 0 || bundle.schema_version > EXPORT_SCHEMA_VERSION {
         return Err(CommandError::validation(format!(
             "备份版本 {} 不受支持（当前最高 {}）",
             bundle.schema_version, EXPORT_SCHEMA_VERSION
         )));
+    }
+    // v2 bundles must carry their tags, with exactly one fallback, and every
+    // task's tag must resolve inside the bundle.
+    let fallback_count = bundle.tags.iter().filter(|t| t.is_fallback).count();
+    if bundle.schema_version >= 2 {
+        if bundle.tags.is_empty() {
+            return Err(CommandError::validation("v2 备份缺少标签数据"));
+        }
+        if fallback_count != 1 {
+            return Err(CommandError::validation("v2 备份必须有且只有一个保底标签"));
+        }
+        for task in &bundle.tasks {
+            if !bundle.tags.iter().any(|t| t.id == task.tag_id) {
+                return Err(CommandError::validation(format!(
+                    "任务“{}”引用了备份中不存在的标签",
+                    task.title
+                )));
+            }
+        }
     }
     validate_settings(&bundle.settings)?;
     for task in &bundle.tasks {
@@ -1751,9 +1887,30 @@ pub fn import_data(conn: &mut Connection, bundle: &ExportBundle) -> Result<Impor
     let now = now_millis();
     let tx = conn.transaction()?;
 
+    // Replace tags first (tasks reference them; timer_state.tag_id is SET NULL
+    // by the FK and the timer is reset to idle below).
+    tx.execute("DELETE FROM sessions", [])?;
+    tx.execute("DELETE FROM tasks", [])?;
+    tx.execute("DELETE FROM tags", [])?;
+    for tag in &bundle.tags {
+        tx.execute(
+            "INSERT INTO tags (id, name, normalized_name, kind, is_fallback, sort_order,
+                               created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![
+                tag.id,
+                tag.name,
+                tag.name.to_lowercase(),
+                tag.kind.as_str(),
+                tag.is_fallback as i64,
+                tag.sort_order,
+                now,
+            ],
+        )?;
+    }
+
     // Replace tasks (ids preserved from the backup; tag_id defaults to the
     // fallback tag for v1 backups via the model's serde default).
-    tx.execute("DELETE FROM tasks", [])?;
     for task in &bundle.tasks {
         tx.execute(
             "INSERT INTO tasks (id, title, done, pomodoro_target, priority, project, tag_id,
@@ -3361,6 +3518,106 @@ mod tests {
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(lines.len(), 3, "header + 2 records (hidden record included)");
         assert!(csv.contains("reset"), "reset record must be in the CSV");
+    }
+
+    // ─── Backup v2: version-header-first parsing (v1.1, review round 2) ───────
+
+    #[test]
+    fn exports_v2_bundle_with_tags() {
+        let conn = db::open_in_memory().expect("db");
+        let bundle = export_data(&conn).expect("export");
+
+        assert_eq!(bundle.schema_version, 2);
+        assert_eq!(bundle.tags.len(), 4);
+        assert_eq!(bundle.tags.iter().filter(|t| t.is_fallback).count(), 1);
+    }
+
+    #[test]
+    fn parses_v1_backup_json_via_header_and_backfills() {
+        let mut conn = db::open_in_memory().expect("db");
+
+        // A literal v1.0.0 backup: no tags, no tagId, no qualification fields.
+        let v1_json = r#"{
+            "app": "abyssal-reverie",
+            "schemaVersion": 1,
+            "exportedAt": 1000,
+            "settings": {
+                "focusDurationMinutes": 25, "shortBreakMinutes": 5,
+                "longBreakMinutes": 15, "autoStartBreak": false,
+                "soundEnabled": true, "notificationEnabled": true,
+                "dailyGoal": 8, "updatedAt": 0
+            },
+            "tasks": [
+                { "id": "t1", "title": "Legacy task", "done": false,
+                  "pomodoroTarget": 2, "priority": "high", "project": "P",
+                  "sortOrder": 0, "createdAt": 1, "updatedAt": 1, "completedAt": null }
+            ],
+            "sessions": [
+                { "id": "s1", "taskId": "t1", "taskTitleSnapshot": "Legacy task",
+                  "projectSnapshot": "P", "mode": "focus", "status": "completed",
+                  "plannedSeconds": 1500, "focusedSeconds": 600, "startedAt": 1, "endedAt": 601 }
+            ]
+        }"#;
+
+        let bundle = parse_backup_text(v1_json).expect("v1 backup parses");
+        assert_eq!(bundle.schema_version, 2, "normalized to the v2 shape");
+        assert_eq!(bundle.tags.len(), 4);
+        assert_eq!(bundle.tasks[0].tag_id, "system-other");
+        assert_eq!(bundle.sessions[0].finish_reason.as_deref(), Some("legacy"));
+        assert_eq!(bundle.sessions[0].statistics_eligible, Some(true));
+        assert_eq!(bundle.sessions[0].qualification_reason.as_deref(), Some("qualified"));
+
+        let summary = import_data(&mut conn, &bundle).expect("import");
+        assert_eq!(summary.tasks, 1);
+        assert_eq!(summary.sessions, 1);
+
+        let task_tag: String = conn
+            .query_row("SELECT tag_id FROM tasks WHERE id = 't1'", [], |r| r.get(0))
+            .expect("task tag");
+        assert_eq!(task_tag, "system-other");
+        let tags: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).expect("tags");
+        assert_eq!(tags, 4);
+    }
+
+    #[test]
+    fn rejects_unknown_backup_version() {
+        let json = r#"{ "app": "abyssal-reverie", "schemaVersion": 99 }"#;
+        let err = parse_backup_text(json).expect_err("must reject");
+        assert!(err.message.contains("不受支持"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn v2_backup_round_trips_through_parse_and_import() {
+        let source = db::open_in_memory().expect("db");
+        insert_task(&source, &create_input("Round trip")).expect("task");
+        seed_completed_focus(&source, "s1", 100, 1500, "A");
+
+        let bundle = export_data(&source).expect("export");
+        let text = serde_json::to_string(&bundle).expect("serialize");
+
+        let parsed = parse_backup_text(&text).expect("parse");
+        assert_eq!(parsed.tags.len(), bundle.tags.len());
+        assert_eq!(parsed.sessions[0].statistics_eligible, Some(true));
+
+        let mut target = db::open_in_memory().expect("db");
+        let summary = import_data(&mut target, &parsed).expect("import");
+        assert_eq!(summary.sessions, 1);
+
+        let restored = list_sessions_query(&target, &SessionQuery {
+            limit: None, from: None, to: None, scope: Some(crate::models::SessionScope::All),
+        }).expect("sessions");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].statistics_eligible, Some(true));
+        assert_eq!(restored[0].tag_name_snapshot.as_deref(), Some("其他"));
+    }
+
+    #[test]
+    fn preview_from_bundle_counts_tags() {
+        let conn = db::open_in_memory().expect("db");
+        let bundle = export_data(&conn).expect("export");
+        let preview = preview_from_bundle(&bundle);
+        assert_eq!(preview.tags, 4);
+        assert_eq!(preview.schema_version, 2);
     }
 
 

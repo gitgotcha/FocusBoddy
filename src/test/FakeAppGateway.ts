@@ -573,7 +573,12 @@ export class FakeAppGateway implements AppGateway {
 
   async previewImport(_path: string): Promise<ImportPreview> {
     this.takeFailure()
-    return { schemaVersion: 1, tasks: this.tasks.length, sessions: this.sessions.length }
+    return {
+      schemaVersion: 2,
+      tags: this.tags.length,
+      tasks: this.tasks.length,
+      sessions: this.sessions.length,
+    }
   }
 
   async importBackup(_path: string): Promise<ImportSummary> {

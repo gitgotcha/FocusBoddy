@@ -262,14 +262,9 @@ pub fn export_sessions_csv_to(state: State<'_, AppState>, path: String) -> Resul
 pub fn preview_import_from(path: String) -> Result<ImportPreview, CommandError> {
     let raw = fs::read_to_string(&path)
         .map_err(|e| CommandError::validation(format!("无法读取文件: {e}")))?;
-    let bundle: ExportBundle = serde_json::from_str(&raw)
-        .map_err(|e| CommandError::validation(format!("备份文件格式无效: {e}")))?;
+    let bundle = repository::parse_backup_text(&raw)?;
     repository::validate_import(&bundle)?;
-    Ok(ImportPreview {
-        schema_version: bundle.schema_version,
-        tasks: bundle.tasks.len() as i64,
-        sessions: bundle.sessions.len() as i64,
-    })
+    Ok(repository::preview_from_bundle(&bundle))
 }
 
 /// Replaces tasks, sessions and settings from the chosen backup file.
@@ -277,8 +272,7 @@ pub fn preview_import_from(path: String) -> Result<ImportPreview, CommandError> 
 pub fn import_backup_from(state: State<'_, AppState>, path: String) -> Result<ImportSummary, CommandError> {
     let raw = fs::read_to_string(&path)
         .map_err(|e| CommandError::validation(format!("无法读取文件: {e}")))?;
-    let bundle: ExportBundle = serde_json::from_str(&raw)
-        .map_err(|e| CommandError::validation(format!("备份文件格式无效: {e}")))?;
+    let bundle = repository::parse_backup_text(&raw)?;
     let mut conn = lock_db(&state)?;
     let mut summary = repository::import_data(&mut conn, &bundle)?;
     summary.path = path;

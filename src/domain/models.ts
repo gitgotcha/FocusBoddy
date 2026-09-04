@@ -220,6 +220,7 @@ export interface SaveSettingsResult {
 /** Row counts returned by `previewImport` before a destructive import. */
 export interface ImportPreview {
   schemaVersion: number
+  tags: number
   tasks: number
   sessions: number
 }

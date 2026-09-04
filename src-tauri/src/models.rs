@@ -531,6 +531,7 @@ pub struct ExportBundle {
     pub schema_version: u32,
     pub exported_at: i64,
     pub settings: AppSettings,
+    pub tags: Vec<Tag>,
     pub tasks: Vec<Task>,
     pub sessions: Vec<TimerSession>,
 }
@@ -540,8 +541,63 @@ pub struct ExportBundle {
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
     pub schema_version: u32,
+    pub tags: i64,
     pub tasks: i64,
     pub sessions: i64,
+}
+
+// ─── Backup parsing DTOs (v1.1 review: version-header-first dispatch) ────────
+
+/// Minimal header read before the payload is deserialized: the version decides
+/// which DTO parses the file, so a v1 backup is never fed to the v2 struct.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupHeader {
+    pub app: String,
+    pub schema_version: u32,
+}
+
+/// v1.0.0 backup shape: no tags, no tag ids, no qualification fields.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportBundleV1 {
+    pub app: String,
+    pub schema_version: u32,
+    #[serde(default)]
+    pub exported_at: i64,
+    pub settings: AppSettings,
+    pub tasks: Vec<TaskV1>,
+    pub sessions: Vec<SessionV1>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskV1 {
+    pub id: String,
+    pub title: String,
+    pub done: bool,
+    pub pomodoro_target: i64,
+    pub priority: TaskPriority,
+    pub project: String,
+    pub sort_order: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionV1 {
+    pub id: String,
+    pub task_id: Option<String>,
+    pub task_title_snapshot: String,
+    pub project_snapshot: String,
+    pub mode: TimerMode,
+    pub status: SessionStatus,
+    pub planned_seconds: i64,
+    pub focused_seconds: i64,
+    pub started_at: i64,
+    pub ended_at: i64,
 }
 
 /// Result of a successful export (bytes written to disk).
