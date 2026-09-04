@@ -47,4 +47,44 @@ describe('TauriAppGateway', () => {
     await gateway.getStatistics(query)
     expect(invokeMock).toHaveBeenCalledWith('get_statistics', { query })
   })
+
+  it('maps the data export & backup commands (item 3)', async () => {
+    invokeMock
+      .mockResolvedValueOnce('backup.json')          // pickExportPath
+      .mockResolvedValueOnce({ path: 'backup.json', bytes: 1024, tasks: 3, sessions: 9 })  // exportBackup
+      .mockResolvedValueOnce('sess.csv')              // pickExportPath
+      .mockResolvedValueOnce({ path: 'sess.csv', bytes: 512, tasks: 0, sessions: 9 })      // exportSessionsCsv
+      .mockResolvedValueOnce('import.json')           // pickImportPath
+      .mockResolvedValueOnce({ schemaVersion: 1, tasks: 3, sessions: 9 })                  // previewImport
+      .mockResolvedValueOnce({ path: 'import.json', tasks: 3, sessions: 9 })               // importBackup
+
+    const gateway = new TauriAppGateway()
+    const exportPath = await gateway.pickExportPath('abyssal-reverie-backup.json')
+    const backup = await gateway.exportBackup(exportPath!)
+    const csvPath = await gateway.pickExportPath('abyssal-reverie-sessions.csv')
+    const csv = await gateway.exportSessionsCsv(csvPath!)
+    const importPath = await gateway.pickImportPath()
+    const preview = await gateway.previewImport(importPath!)
+    const imported = await gateway.importBackup(importPath!)
+
+    expect(exportPath).toBe('backup.json')
+    expect(backup.bytes).toBe(1024)
+    expect(csvPath).toBe('sess.csv')
+    expect(csv.sessions).toBe(9)
+    expect(importPath).toBe('import.json')
+    expect(preview.tasks).toBe(3)
+    expect(imported.tasks).toBe(3)
+
+    expect(invokeMock.mock.calls.map(([name]) => name)).toEqual([
+      'pick_export_path',
+      'export_backup_to',
+      'pick_export_path',
+      'export_sessions_csv_to',
+      'pick_import_path',
+      'preview_import_from',
+      'import_backup_from',
+    ])
+    expect(invokeMock).toHaveBeenCalledWith('export_backup_to', { path: 'backup.json' })
+    expect(invokeMock).toHaveBeenCalledWith('import_backup_from', { path: 'import.json' })
+  })
 })

@@ -12,6 +12,8 @@ use tauri::{
     AppHandle, Emitter, Manager, Wry,
 };
 
+use crate::repository;
+
 /// Stable menu-item ids. Frontend/Rust communicate tray actions via the
 /// `tray-action` event; ids stay on the Rust side.
 const ID_STATUS: &str = "tray_status";
@@ -130,6 +132,16 @@ fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             show_main_window(app);
         }
         ID_QUIT => {
+            // User rule: if a focus session is running, freeze it as paused
+            // before exit so focus time is not silently consumed on the next
+            // launch (the user resumes manually). A non-running timer is left
+            // untouched. The WAL is checkpointed inside the call so the change
+            // survives the imminent process exit.
+            if let Some(state) = app.try_state::<crate::AppState>() {
+                if let Ok(conn) = state.db.lock() {
+                    let _ = repository::persist_running_as_paused(&conn);
+                }
+            }
             app.exit(0);
         }
         _ => {}

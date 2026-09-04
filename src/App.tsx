@@ -1156,7 +1156,7 @@ function StatsPanel({ logs, sessionCount, stats }:
   const dailyGoal    = stats?.dailyGoal ?? DEFAULT_SETTINGS.dailyGoal;
   const goalProgress = Math.min(1, sessionCount/dailyGoal);
 
-  // Real per-day data from the statistics query, aligned Mon..Sun like WEEK_DATA.
+  // Real per-day data from the statistics query, aligned Mon..Sun.
   const weekDays = weekBoundaries();
   const dayLabel = ["一","二","三","四","五","六","日"];
   const weekData = weekDays.map((b, i) => {

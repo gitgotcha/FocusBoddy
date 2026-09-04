@@ -807,6 +807,37 @@ pub fn complete_timer(
     })
 }
 
+/// Freezes a running timer as paused before the app quits via the tray.
+///
+/// Per the user's explicit rule: when the user chooses "彻底退出" (quit) from
+/// the tray while a focus session is running, the remaining time must be saved
+/// and the state restored as `paused` so focus time is not silently consumed on
+/// the next launch — the user resumes manually. A non-running timer is left
+/// untouched (this is a no-op for idle/paused/done).
+///
+/// The remaining time is derived from `target_end_at` (drift-free), `target_end_at`
+/// is cleared, `paused_at` is stamped, and the revision is bumped. The WAL is
+/// checkpointed so the change survives the imminent process exit even with
+/// `synchronous=NORMAL`.
+pub fn persist_running_as_paused(conn: &Connection) -> Result<(), CommandError> {
+    let mut timer = get_timer(conn)?;
+    if timer.state != TimerState::Running {
+        return Ok(());
+    }
+    let now = now_millis();
+    timer.remaining_seconds = live_remaining(&timer, now);
+    timer.state = TimerState::Paused;
+    timer.target_end_at = None;
+    timer.paused_at = Some(now);
+    timer.revision += 1;
+    timer.updated_at = now;
+    write_timer(conn, &timer)?;
+    // Force the WAL into the main db file before the process exits so the
+    // paused state is durable across `app.exit(0)`.
+    let _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", []);
+    Ok(())
+}
+
 /// Lists sessions matching the frontend's query (limit + optional time range).
 pub fn list_sessions_query(
     conn: &Connection,
@@ -1990,6 +2021,84 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    // ─── Quit-while-running persistence (Item 4, Round 1) ─────────────────────
+
+    #[test]
+    fn persist_running_as_paused_freezes_remaining_and_bumps_revision() {
+        let mut conn = db::open_in_memory().expect("db");
+        let mut timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+
+        // Simulate 20 seconds elapsed.
+        timer.target_end_at = Some(now_millis() + 1480 * 1000);
+        write_timer(&conn, &timer).expect("write");
+
+        persist_running_as_paused(&conn).expect("persist");
+
+        let stored = get_timer(&conn).expect("reload");
+        assert_eq!(stored.state, TimerState::Paused);
+        assert!(stored.target_end_at.is_none(), "target_end_at must be cleared");
+        assert!(stored.paused_at.is_some(), "paused_at must be stamped");
+        assert!(stored.remaining_seconds >= 1475 && stored.remaining_seconds <= 1500,
+            "remaining should be ~1480, got {}", stored.remaining_seconds);
+        assert_eq!(stored.revision, 2, "revision must advance");
+        assert!(stored.active_session_id.is_some(), "session must be preserved for manual resume");
+    }
+
+    #[test]
+    fn persist_running_as_paused_is_a_noop_when_not_running() {
+        let conn = db::open_in_memory().expect("db");
+        // Idle timer: nothing to freeze.
+        persist_running_as_paused(&conn).expect("persist");
+
+        let stored = get_timer(&conn).expect("reload");
+        assert_eq!(stored.state, TimerState::Idle);
+        assert_eq!(stored.revision, 0, "idle timer must not be mutated");
+
+        // A paused timer must also be left untouched.
+        let mut paused = get_timer(&conn).expect("reload");
+        paused.state = TimerState::Paused;
+        paused.remaining_seconds = 1234;
+        paused.revision = 5;
+        write_timer(&conn, &paused).expect("write");
+        persist_running_as_paused(&conn).expect("persist again");
+
+        let stored2 = get_timer(&conn).expect("reload");
+        assert_eq!(stored2.state, TimerState::Paused);
+        assert_eq!(stored2.remaining_seconds, 1234);
+        assert_eq!(stored2.revision, 5, "paused timer must not be mutated");
+    }
+
+    #[test]
+    fn quit_as_paused_is_resumable_on_next_launch() {
+        let mut conn = db::open_in_memory().expect("db");
+        let timer = start_timer(&mut conn, &settings(), &StartTimerInput {
+            expected_revision: 0, mode: TimerMode::Focus, selected_task_id: None,
+        }).expect("start");
+        let session_id = timer.active_session_id.clone().unwrap();
+
+        // Quit while running → frozen as paused (revision advances 1 → 2).
+        persist_running_as_paused(&conn).expect("persist");
+        let paused = get_timer(&conn).expect("reload");
+        assert_eq!(paused.revision, 2);
+
+        // Next launch sees a paused timer; resume then complete it.
+        let resumed = resume_timer(&mut conn, &crate::models::TimerRevisionInput {
+            expected_revision: 2,
+        }).expect("resume");
+        assert_eq!(resumed.state, TimerState::Running);
+        assert_eq!(resumed.revision, 3);
+
+        let result = complete_timer(&mut conn, &settings(), &CompleteTimerInput {
+            expected_revision: 3, active_session_id: session_id, recovery: None,
+        }).expect("complete");
+        assert!(result.newly_completed);
+        assert_eq!(result.session.status, SessionStatus::Completed);
+        assert_eq!(result.session.mode, TimerMode::Focus);
+    }
+
 
     // ─── Data export & backup tests (Item 3) ───────────────────────────────
 
