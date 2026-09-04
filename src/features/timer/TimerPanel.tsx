@@ -8,13 +8,18 @@ import { playCompletionSound, notifyCompletion } from "../shared/notify";
 import { GoalRing } from "./GoalRing";
 import { TimerArc } from "./TimerArc";
 
-export function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, onSwitchMode, onExpire }: {
+export function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, onResetRequest, onFinish, onSwitchMode, onExpire }: {
   timer: TimerSnapshot | null;
   tasks: Task[];
   onStart: (mode: TimerMode, taskId: string | null) => void;
   onPause: () => void;
   onResume: () => void;
+  /** Direct reset — only legal from idle/done (active resets confirm first). */
   onReset: () => void;
+  /** Active reset: App opens the confirm dialog, then runs the reset. */
+  onResetRequest: () => void;
+  /** Manual "结束" — routes to gateway.finishTimer (v1.1). */
+  onFinish: () => void;
   onSwitchMode: (mode: TimerMode) => void;
   onExpire: () => void;
 }) {
@@ -60,7 +65,8 @@ export function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, 
     else if (state === "idle" || state === "done") onStart(mode, selectedTask);
   };
   const handlePause = () => { if (state === "running") onPause(); };
-  const handleReset = () => onReset();
+  const active = state === "running" || state === "paused";
+  const handleReset = () => { if (active) onResetRequest(); else onReset(); };
   const switchMode  = (m: TimerMode) => onSwitchMode(m);
 
   const { m, s } = formatSeconds(remaining);
@@ -90,6 +96,8 @@ export function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, 
         <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 22px" }}>
           {(["focus","short","long"] as TimerMode[]).map(md => (
             <button key={md} onClick={() => switchMode(md)} className="btn-mode"
+              disabled={active}
+              title={active ? "请先结束或重置当前计时" : `切换到${MODE_LABELS[md]}`}
               style={{
                 fontFamily: "var(--font-sans)", fontSize: 12,
                 fontWeight: mode === md ? 500 : 400,
@@ -97,7 +105,8 @@ export function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, 
                 border: `0.5px solid ${mode === md ? C.hairlineStr : "transparent"}`,
                 background: mode === md ? "rgba(27,37,44,0.38)" : "transparent",
                 color: mode === md ? C.moonlight : C.textMuted,
-                cursor: "pointer", /* focus rings come from index.css (:focus / :focus-visible) */
+                opacity: active ? 0.45 : 1,
+                cursor: active ? "default" : "pointer", /* focus rings come from index.css (:focus / :focus-visible) */
               }}>
               {MODE_LABELS[md]}
             </button>
@@ -162,8 +171,8 @@ export function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, 
         {/* Controls */}
         <div className="su-2 surface-up" style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <button onClick={handleReset}
-            title={state === "running" || state === "paused" ? "结束本次（不计入统计）" : "重置"}
-            aria-label={state === "running" || state === "paused" ? "结束本次（不计入统计）" : "重置计时"}
+            title="重置计时"
+            aria-label="重置计时"
             className="btn-ctrl" style={ctrlBtn}>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M2 7a5 5 0 1 0 1-3H1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
@@ -211,11 +220,17 @@ export function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, 
             </button>
           )}
 
-          <button title="切换模式" className="btn-ctrl"
-            onClick={() => { const ms = ["focus","short","long"] as TimerMode[]; switchMode(ms[(ms.indexOf(mode)+1)%3]); }}
-            style={ctrlBtn}>
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M3 7H11M8 4L11 7L8 10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+          <button onClick={onFinish} disabled={!active}
+            title={active ? "结束本次" : "结束（计时进行中可用）"}
+            aria-label="结束本次"
+            className="btn-ctrl"
+            style={{
+              ...ctrlBtn,
+              opacity: active ? 1 : 0.35,
+              cursor: active ? "pointer" : "default",
+            }}>
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+              <rect x="2.5" y="2.5" width="9" height="9" rx="1.6" fill="currentColor" />
             </svg>
           </button>
         </div>

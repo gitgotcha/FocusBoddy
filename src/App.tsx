@@ -15,6 +15,8 @@ import { TasksPanel } from "./features/tasks/TasksPanel";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { StatsPanel, StatsPage } from "./features/stats/StatsPanel";
 import { MiniBar } from "./features/shared/MiniBar";
+import { ConfirmDialog } from "./components/ConfirmDialog";
+import { ToastHost } from "./components/ToastHost";
 
 const NAV_ITEMS: { id: NavSection; label: string; icon: React.JSX.Element }[] = [
   { id: "timer",    label: "专注",   icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6"/><path d="M12 7v5l3 3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg> },
@@ -212,6 +214,8 @@ export default function App() {
   const [weekStats, setWeekStats] = useState<Statistics | null>(null);
   const [timer, setTimer] = useState<TimerSnapshot | null>(null);
   const [shortcutConflict, setShortcutConflict] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [resetConfirm, setResetConfirm] = useState(false);
 
   // Ref mirrors so async callbacks always see the latest snapshot without
   // becoming stale closures.
@@ -309,11 +313,42 @@ export default function App() {
 
   // Reset (= end/abandon the session) refreshes both the activity log and the
   // statistics: the abandoned attempt is stored but never counted (spec §6).
+  // v1.1: manual finish via finish_timer — records actual focused time;
+  // eligible sessions join the activity view, short ones only toast.
+  const runFinish = useCallback(() => {
+    const cur = timerRef.current;
+    if (!cur || !cur.activeSessionId) return;
+    gateway.finishTimer({
+      expectedRevision: cur.revision,
+      activeSessionId: cur.activeSessionId,
+    })
+      .then(result => {
+        applyTimer(result.timer);
+        if (result.newlyFinished) {
+          setLogs(p => [...p, sessionToLog(result.session)]);
+          refreshStats();
+          if (result.statisticsEligible) {
+            setToast(`已记录 ${Math.max(1, Math.round(result.session.focusedSeconds / 60))} 分钟专注`);
+          } else {
+            setToast("本次不足 30 秒，未计入统计");
+          }
+        }
+      })
+      .catch(resync);
+  }, [gateway, applyTimer, refreshStats, resync]);
+
   const handleReset = useCallback(() => {
     runRevisionAction("reset")
       .then(() => { resyncLogs(); refreshStats(); })
       .catch(resync);
   }, [runRevisionAction, resyncLogs, refreshStats, resync]);
+
+  const confirmReset = useCallback(() => {
+    setResetConfirm(false);
+    handleReset();
+    setToast("本次进度已重置。");
+  }, [handleReset]);
+
 
   // Goal ring / today minutes: completed focus sessions only.
   const countedFocusLogs = logs.filter(isCountedFocus);
@@ -439,6 +474,8 @@ export default function App() {
           onPause={handlePause}
           onResume={handleResume}
           onReset={handleReset}
+          onResetRequest={() => setResetConfirm(true)}
+          onFinish={runFinish}
           onSwitchMode={handleSwitchMode}
           onExpire={handleExpire}
         />
