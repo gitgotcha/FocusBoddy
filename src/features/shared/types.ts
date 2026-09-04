@@ -8,4 +8,6 @@ export interface SessionLog {
   id: string; time: string; duration: number; task: string;
   mode: TimerMode;
   status: "completed" | "abandoned";
+  /** Tag name frozen at session time (v1.1 §11.6). Null for legacy rows. */
+  tag: string | null;
 }

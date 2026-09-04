@@ -198,6 +198,14 @@ export function StatsPanel({ logs, todayStats, stats, reduceMotion }:
                           padding:"1px 4px", border:`1px solid ${C.hairline}`,
                         }}>已中止 · 不计入</span>
                       )}
+                      {log.tag && (
+                        <span style={{
+                          fontFamily:"var(--font-sans)", fontSize:8, flexShrink:0,
+                          color:"rgba(170,190,196,0.60)",
+                          background:"rgba(27,37,44,0.22)", borderRadius:3,
+                          padding:"1px 4px", border:`0.5px solid ${C.hairline}`,
+                        }}>{log.tag}</span>
+                      )}
                       {log.mode !== "focus" && log.status === "completed" && (
                         <span style={{
                           fontFamily:"var(--font-sans)", fontSize:8, color:C.textMuted,

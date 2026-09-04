@@ -18,6 +18,7 @@ export function sessionToLog(session: TimerSession): SessionLog {
     time: `${pad(at.getHours())}:${pad(at.getMinutes())}`,
     duration: Math.round(session.focusedSeconds / 60),
     task: session.taskTitleSnapshot,
+    tag: session.tagNameSnapshot ?? null,
     mode: session.mode,
     status: session.status,
   };
