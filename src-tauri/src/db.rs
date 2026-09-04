@@ -87,10 +87,16 @@ pub fn open_in_memory() -> Result<Connection, CommandError> {
 /// Opens (or creates) the on-disk database, creating parent directories as needed.
 ///
 /// Defensive against a corrupt on-disk database (P0: the app must still start):
-/// if the file cannot be opened/migrated/seeded, or fails `PRAGMA integrity_check`,
-/// it is renamed aside with a `.corrupt-<timestamp>` suffix (preserved for manual
-/// recovery) and a fresh database is created in its place. The corrupt file is
-/// never silently discarded.
+/// if the file cannot be opened or fails `PRAGMA integrity_check`, it is renamed
+/// aside with a `.corrupt-<timestamp>` suffix (preserved for manual recovery)
+/// and a fresh database is created in its place. The corrupt file is never
+/// silently discarded.
+///
+/// **Migration failure is NOT corruption** (v1.1 review #2): if opening and the
+/// integrity check succeed but a schema migration fails, the transaction rolls
+/// back, the original file is preserved untouched, and startup aborts with a
+/// diagnosable error — no rename, no fresh empty database. Before any pending
+/// migration runs, a timestamped backup of the database is created.
 pub fn open_at(path: &Path) -> Result<Connection, CommandError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -103,31 +109,90 @@ pub fn open_at(path: &Path) -> Result<Connection, CommandError> {
         }
     }
 
-    match try_open_at(path) {
-        Ok(conn) if is_healthy(&conn) => Ok(conn),
-        Ok(conn) => {
-            // Opened but failed the integrity check — recover from a renamed copy.
-            drop(conn);
-            recover_corrupt(path)?;
-            try_open_at(path)
-        }
+    // Phase 1 — open + configure. An unreadable/unopenable file is treated as
+    // corrupt media and goes through the recovery path.
+    let mut conn = match open_and_configure(path) {
+        Ok(conn) => conn,
         Err(_) => {
-            // Could not open/migrate/seed — recover from a renamed copy.
             recover_corrupt(path)?;
-            try_open_at(path)
+            return fresh_database(path);
         }
+    };
+
+    // Phase 2 — integrity. A corrupt file → isolate + rebuild.
+    if !is_healthy(&conn) {
+        drop(conn);
+        recover_corrupt(path)?;
+        return fresh_database(path);
     }
+
+    // Phase 3 — a pending upgrade → timestamped safety copy first.
+    let version = schema_version(&conn)?;
+    if version > 0 && version < LATEST_SCHEMA_VERSION {
+        backup_before_migration(&conn, path)?;
+    }
+
+    // Phase 4 — migrate + seed. Failure here is NOT corruption: the
+    // transaction has already rolled back, the original file stays untouched,
+    // and startup must abort with a diagnosable error.
+    if let Err(err) = migrate_and_seed(&mut conn) {
+        return Err(CommandError::database(format!(
+            "schema migration failed; the original database was preserved at {} \
+             and no changes were applied: {err}",
+            path.display()
+        )));
+    }
+
+    Ok(conn)
 }
 
-/// Opens, configures, migrates and seeds a database. Any failure here signals
-/// either an unreadable file or a schema problem, both of which `open_at`
-/// resolves by renaming the file aside and starting fresh.
-fn try_open_at(path: &Path) -> Result<Connection, CommandError> {
-    let mut conn = Connection::open(path)?;
+/// Opens and configures a connection without migrating or seeding.
+fn open_and_configure(path: &Path) -> Result<Connection, CommandError> {
+    let conn = Connection::open(path)?;
     configure(&conn, true)?;
-    run_migrations(&mut conn)?;
-    seed_defaults(&conn)?;
     Ok(conn)
+}
+
+/// Runs migrations and seeds defaults on an already-configured connection.
+fn migrate_and_seed(conn: &mut Connection) -> Result<(), CommandError> {
+    run_migrations(conn)?;
+    seed_defaults(conn)?;
+    Ok(())
+}
+
+/// Recovery path for corrupt media: create a fresh, fully migrated and seeded
+/// database at `path` (the corrupt file has already been renamed aside).
+fn fresh_database(path: &Path) -> Result<Connection, CommandError> {
+    let mut conn = open_and_configure(path)?;
+    migrate_and_seed(&mut conn)?;
+    Ok(conn)
+}
+
+/// Copies the database file aside as `<name>.pre-v<target>-<timestamp>.bak`
+/// before an in-place schema upgrade, so a failed/corrupted upgrade always has
+/// a restorable snapshot. The WAL is checkpointed first so the copy includes
+/// every committed transaction.
+fn backup_before_migration(conn: &Connection, path: &Path) -> Result<(), CommandError> {
+    let _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", []);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let base = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if base.is_empty() {
+        return Ok(());
+    }
+    let backup = path.with_file_name(format!("{base}.pre-v{LATEST_SCHEMA_VERSION}-{ts}.bak"));
+    std::fs::copy(path, &backup).map_err(|err| {
+        CommandError::internal(format!(
+            "failed to create pre-migration backup {}: {err}",
+            backup.display()
+        ))
+    })?;
+    Ok(())
 }
 
 /// A healthy database reports exactly "ok" from `PRAGMA integrity_check`.
@@ -549,6 +614,118 @@ mod tests {
         assert_eq!(settings.focus_duration_minutes, 17, "user setting preserved");
         assert!(!settings.reduce_motion, "new column defaults to false");
         assert_eq!(count(&conn, "tasks"), 1, "task data preserved");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── A0: migration failure ≠ corruption (v1.1 review #2) ──────────────────
+
+    #[test]
+    fn migration_failure_preserves_database_and_blocks_startup() {
+        let dir = std::env::temp_dir().join(format!(
+            "abyssal-migfail-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let db_path = dir.join("abyssal-reverie.sqlite");
+
+        // A genuine v1 database with a hostile pre-existing `reduce_motion`
+        // column, so the v2 migration (ALTER TABLE ... ADD reduce_motion)
+        // deterministically fails with "duplicate column name".
+        {
+            let mut conn = Connection::open(&db_path).expect("open");
+            conn.execute_batch(MIGRATION_V1).expect("apply v1");
+            conn.pragma_update(None, "user_version", 1u32).expect("v1 marker");
+            conn.execute_batch("ALTER TABLE settings ADD COLUMN reduce_motion TEXT;")
+                .expect("hostile column");
+            conn.execute(
+                "INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', 'Kept', 1, 1)",
+                [],
+            )
+            .expect("task");
+        }
+
+        let result = open_at(&db_path);
+
+        // Startup must be blocked with a diagnosable migration error.
+        let err = result.expect_err("migration failure must block startup");
+        assert!(
+            err.message.contains("migration"),
+            "error must mention migration, got: {}",
+            err.message
+        );
+
+        // The original database must be preserved: same version, same data.
+        let raw = Connection::open(&db_path).expect("original file must still open");
+        let version: u32 = raw
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version readable");
+        assert_eq!(version, 1, "user_version must be unchanged");
+        let tasks: i64 = raw
+            .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+            .expect("count readable");
+        assert_eq!(tasks, 1, "original data must be preserved");
+
+        // Migration failure must NOT be treated as corruption: no rename, and
+        // no fresh empty database created in place of the original.
+        let renamed = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"));
+        assert!(!renamed, "migration failure must not trigger corrupt-recovery");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pre_migration_backup_is_created_before_upgrading() {
+        let dir = std::env::temp_dir().join(format!(
+            "abyssal-prebackup-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let db_path = dir.join("abyssal-reverie.sqlite");
+
+        {
+            let mut conn = Connection::open(&db_path).expect("open");
+            conn.execute_batch(MIGRATION_V1).expect("apply v1");
+            conn.pragma_update(None, "user_version", 1u32).expect("v1 marker");
+            conn.execute(
+                "INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('t1', 'Kept', 1, 1)",
+                [],
+            )
+            .expect("task");
+        }
+
+        let conn = open_at(&db_path).expect("upgrade should succeed");
+        assert_eq!(schema_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+
+        let mut backups: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".pre-v"))
+            .collect();
+        backups.sort();
+        assert_eq!(
+            backups.len(),
+            1,
+            "exactly one pre-migration backup expected, got: {backups:?}"
+        );
+
+        // The backup must preserve the pre-migration (v1) state.
+        let backup_path = dir.join(&backups[0]);
+        let raw = Connection::open(&backup_path).expect("backup must open");
+        let version: u32 = raw
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("backup version readable");
+        assert_eq!(version, 1, "backup must preserve pre-migration version");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
