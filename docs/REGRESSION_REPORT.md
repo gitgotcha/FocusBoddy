@@ -25,7 +25,7 @@
 - 门禁：cargo test **95 passed**（+1 ignored 真实库演练）；tsc 0；vitest **24 passed**；cargo release EXE 构建 ✓
 
 ### 交付物
-- 便携版：`src-tauri/target/release/abyssal-reverie.exe`（12,176,384 字节，SHA-256 `ad92e6ede1d28029adae6e6251454086ea8d2ba648891d1df8c1096c964ccdc2`）
+- 便携版：`src-tauri/target/release/abyssal-reverie.exe`（12,176,384 字节，SHA-256 `f52bfa36de3349904e318ba85a8cfcdb5f79a1dbc6b8646b8c154c61f6302d33`）
 - NSIS 安装包：**待构建**——本环境 wmic.exe 被沙箱黑名单拦截（需用户移除后执行 `pnpm tauri build`）
 - 文档：CHANGELOG v1.1.0、KNOWN_ISSUES KI-08~10、ACCEPTANCE_GUIDE H1–H8
 
