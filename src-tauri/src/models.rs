@@ -381,6 +381,9 @@ pub struct Statistics {
     pub best_day: Option<String>,
     pub by_day: Vec<DayStat>,
     pub by_project: Vec<ProjectStat>,
+    /// v1.1: tag distribution, aggregated by tag_name_snapshot (renaming a
+    /// tag must not rewrite historical statistics).
+    pub by_tag: Vec<ProjectStat>,
 }
 
 // ─── Command payloads ────────────────────────────────────────────────────────

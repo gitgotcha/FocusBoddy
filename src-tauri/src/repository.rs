@@ -1604,6 +1604,25 @@ pub fn get_statistics(
         })
         .collect();
 
+    // by_tag: aggregate by the FROZEN tag name snapshot — a tag rename must
+    // never rewrite historical statistics (v1.1 §11.7).
+    let mut by_tag_map: std::collections::BTreeMap<String, (i64, i64)> = std::collections::BTreeMap::new();
+    for s in &sessions {
+        let tag = s.tag_name_snapshot.clone().unwrap_or_else(|| "其他".to_owned());
+        let entry = by_tag_map.entry(tag).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += s.focused_seconds;
+    }
+    let mut by_tag: Vec<ProjectStat> = by_tag_map
+        .iter()
+        .map(|(tag, (sessions, seconds))| ProjectStat {
+            project: tag.clone(),
+            sessions: *sessions,
+            focus_seconds: *seconds,
+        })
+        .collect();
+    by_tag.sort_by(|a, b| b.focus_seconds.cmp(&a.focus_seconds).then(a.project.cmp(&b.project)));
+
     // best_day: the date with the most focus seconds.
     let best_day = by_day
         .iter()
@@ -1626,6 +1645,7 @@ pub fn get_statistics(
         best_day,
         by_day,
         by_project,
+    by_tag,
     })
 }
 
@@ -1680,6 +1700,23 @@ pub fn all_time_statistics(conn: &Connection) -> Result<Statistics, CommandError
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
+    let mut by_tag_stmt = conn.prepare(
+        "SELECT COALESCE(tag_name_snapshot, '其他') AS tag, COUNT(*) AS sessions,
+                COALESCE(SUM(focused_seconds), 0) AS focus_seconds
+         FROM sessions
+         WHERE mode = 'focus' AND status = 'completed' AND statistics_eligible = 1
+         GROUP BY tag ORDER BY focus_seconds DESC, tag ASC",
+    )?;
+    let by_tag = by_tag_stmt
+        .query_map([], |row| {
+            Ok(ProjectStat {
+                project: row.get(0)?,
+                sessions: row.get(1)?,
+                focus_seconds: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
     let settings = get_settings(conn)?;
 
     Ok(Statistics {
@@ -1692,6 +1729,7 @@ pub fn all_time_statistics(conn: &Connection) -> Result<Statistics, CommandError
         best_day: None,
         by_day: Vec::new(),
         by_project,
+        by_tag,
     })
 }
 
@@ -2722,6 +2760,43 @@ mod tests {
         .expect("stats");
 
         assert_eq!(stats.best_day, Some("d2".to_owned()));
+    }
+
+    #[test]
+    fn get_statistics_aggregates_by_tag_snapshot() {
+        let conn = db::open_in_memory().expect("db");
+        // Sessions with explicit tag snapshots (as they would be frozen at
+        // start time). One shares the snapshot with another → grouped.
+        let rows = [
+            ("s1", "工作", 600i64, 100i64),
+            ("s2", "工作", 900, 200),
+            ("s3", "学习", 300, 300),
+        ];
+        for (id, tag, focused, started) in rows {
+            let (fallback_id, _) = fallback_tag(&conn).expect("fallback");
+            conn.execute(
+                "INSERT INTO sessions (id, task_id, task_title_snapshot, project_snapshot, tag_id,
+                       tag_name_snapshot, mode, status, planned_seconds, focused_seconds,
+                       started_at, ended_at, finish_reason, statistics_eligible, qualification_reason)
+                 VALUES (?1, NULL, 't', 'P', ?2, ?3, 'focus', 'completed', 1500, ?4,
+                         ?5, ?6, 'manual_finish', 1, 'qualified')",
+                params![id, fallback_id, tag, focused, started, started + focused * 1000],
+            )
+            .expect("seed");
+        }
+
+        let stats = get_statistics(
+            &conn,
+            &StatisticsQuery { from: 0, to: 1_000_000_000, days: vec![] },
+        )
+        .expect("stats");
+
+        assert_eq!(stats.by_tag.len(), 2);
+        let work = stats.by_tag.iter().find(|t| t.project == "工作").expect("工作");
+        assert_eq!(work.sessions, 2);
+        assert_eq!(work.focus_seconds, 1500);
+        let study = stats.by_tag.iter().find(|t| t.project == "学习").expect("学习");
+        assert_eq!(study.focus_seconds, 300);
     }
 
     #[test]

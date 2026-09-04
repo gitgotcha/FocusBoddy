@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import type { Statistics } from "../../domain/models";
 import { DEFAULT_SETTINGS } from "../../domain/defaults";
 import { weekBoundaries } from "../../domain/statistics";
@@ -5,16 +6,19 @@ import { C, CARD, SIDEBAR_GLASS } from "../shared/palette";
 import { GoalRing, HorizonDivider } from "../timer/GoalRing";
 import { catmullRomPath } from "../timer/TimerArc";
 import { MiniBar } from "../shared/MiniBar";
-import { chineseDate, isCountedFocus } from "../shared/format";
+import { chineseDate } from "../shared/format";
 import type { SessionLog } from "../shared/types";
 
-export function StatsPanel({ logs, sessionCount, stats }:
-  { logs: SessionLog[]; sessionCount: number; stats: Statistics | null }) {
+export function StatsPanel({ logs, todayStats, stats, reduceMotion }:
+  { logs: SessionLog[]; todayStats: Statistics | null; stats: Statistics | null; reduceMotion: boolean }) {
 
-  // "时长" counts completed focus sessions only (breaks/abandoned excluded).
-  const todayMinutes = logs.filter(isCountedFocus).reduce((s,l) => s+l.duration, 0);
+  // F6: today's minutes and session count come from the authoritative Rust
+  // statistics query (strict local day boundaries) — never from the
+  // 50-record activity log.
+  const todayCount   = todayStats?.focusSessionCount ?? 0;
+  const todayMinutes = Math.round((todayStats?.focusSeconds ?? 0) / 60);
   const dailyGoal    = stats?.dailyGoal ?? DEFAULT_SETTINGS.dailyGoal;
-  const goalProgress = Math.min(1, sessionCount/dailyGoal);
+  const goalProgress = Math.min(1, todayCount/dailyGoal);
 
   // Real per-day data from the statistics query, aligned Mon..Sun.
   const weekDays = weekBoundaries();
@@ -30,6 +34,41 @@ export function StatsPanel({ logs, sessionCount, stats }:
     .slice()
     .sort((a, b) => b.focusSeconds - a.focusSeconds);
   const maxProject = Math.max(1, ...projects.map(p => p.sessions));
+
+  // byTag: frozen tag-name snapshots (v1.1 §11.7 — renames never rewrite
+  // historical statistics).
+  const tagStats = (stats?.byTag ?? [])
+    .slice()
+    .sort((a, b) => b.focusSeconds - a.focusSeconds);
+  const maxTag = Math.max(1, ...tagStats.map(t => t.sessions));
+
+  // F5: activity list auto-positioning. Display order is oldest-at-top,
+  // newest-at-bottom; a newly appended record scrolls into view (smooth, or
+  // instant under reduced motion) and flashes a moonlight ring for 1.2s.
+  const listRef = useRef<HTMLDivElement>(null);
+  const lastNewestRef = useRef<string | null>(null);
+  const mountedRef = useRef(false);
+  const [freshId, setFreshId] = useState<string | null>(null);
+  const newestId = logs[0]?.id ?? null;
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      lastNewestRef.current = newestId;
+      requestAnimationFrame(() => listRef.current?.scrollTo({ top: listRef.current.scrollHeight }));
+      return;
+    }
+    if (newestId && newestId !== lastNewestRef.current) {
+      lastNewestRef.current = newestId;
+      setFreshId(newestId);
+      listRef.current?.scrollTo({
+        top: listRef.current.scrollHeight,
+        behavior: reduceMotion ? "auto" : "smooth",
+      });
+      const timer = window.setTimeout(() => setFreshId(null), 1200);
+      return () => window.clearTimeout(timer);
+    }
+    lastNewestRef.current = newestId;
+  }, [logs, newestId, reduceMotion]);
 
   return (
     <aside className="right-panel" style={{
@@ -56,7 +95,7 @@ export function StatsPanel({ logs, sessionCount, stats }:
         <div>
           <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:3 }}>专注</div>
           <div style={{ display:"flex", alignItems:"baseline", gap:3 }}>
-            <span style={{ fontFamily:"var(--font-display)", fontVariantNumeric:"tabular-nums", fontSize:22, fontWeight:400, color:"#FFFFFF", lineHeight:1, textShadow:"0 1px 6px rgba(0,0,0,0.5)" }}>{sessionCount}</span>
+            <span style={{ fontFamily:"var(--font-display)", fontVariantNumeric:"tabular-nums", fontSize:22, fontWeight:400, color:"#FFFFFF", lineHeight:1, textShadow:"0 1px 6px rgba(0,0,0,0.5)" }}>{todayCount}</span>
             <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color:C.textMuted }}>/ {dailyGoal}</span>
           </div>
         </div>
@@ -71,7 +110,7 @@ export function StatsPanel({ logs, sessionCount, stats }:
       <HorizonDivider />
 
       {/* Week bars */}
-      <div style={{ padding:"9px 16px" }}>
+      <div style={{ padding:"8px 16px" }}>
         <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:8 }}>本周</div>
         <div style={{ display:"flex", gap:3, alignItems:"flex-end", height:44 }}>
           {weekData.map((d, i) => {
@@ -96,7 +135,7 @@ export function StatsPanel({ logs, sessionCount, stats }:
       <HorizonDivider />
 
       {/* Project bars */}
-      <div style={{ padding:"9px 16px" }}>
+      <div style={{ padding:"8px 16px" }}>
         <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:8 }}>项目</div>
         {(projects.length === 0 ? (
           <div style={{ fontSize:11, color:C.textMuted, fontStyle:"italic", fontFamily:"var(--font-sans)" }}>暂无项目数据</div>
@@ -114,21 +153,26 @@ export function StatsPanel({ logs, sessionCount, stats }:
       <HorizonDivider />
 
       {/* Session log — 航线 nautical route */}
-      <div style={{ padding:"9px 16px", flex:1 }}>
+      <div ref={listRef} style={{ padding:"8px 16px", flex:1, overflowY:"auto", minHeight:120 }}>
         <div style={{ fontFamily:"var(--font-sans)", fontSize:9, color:C.textMuted, letterSpacing:"0.10em", textTransform:"uppercase", marginBottom:10 }}>专注航线</div>
         {logs.length === 0 ? (
           <div style={{ fontSize:11, color:C.textMuted, fontStyle:"italic", fontFamily:"var(--font-sans)" }}>今日尚无记录</div>
         ) : (
           <div style={{ display:"flex", flexDirection:"column" }}>
             {logs.slice().reverse().map((log, idx, arr) => {
-              const isLast  = idx === arr.length-1;
-              const isFresh = idx === 0;
+              // Display is oldest-at-top / newest-at-bottom: the NEWEST record
+              // is the last rendered row.
+              const isNewest = idx === arr.length-1;
+              const isLast   = idx === arr.length-1;
+              const isFresh  = freshId === log.id;
               return (
-                <div key={log.id} style={{ display:"flex", gap:9, alignItems:"flex-start" }}>
+                <div key={log.id}
+                  className={isFresh && !reduceMotion ? "log-fresh" : ""}
+                  style={{ display:"flex", gap:9, alignItems:"flex-start" }}>
                   <div style={{ display:"flex", flexDirection:"column", alignItems:"center", flexShrink:0, width:11 }}>
                     <div style={{ position:"relative", flexShrink:0, marginTop:2 }}>
-                      {isFresh && <div style={{ position:"absolute", inset:-3, borderRadius:"50%", border:"0.5px solid rgba(255,255,255,0.4)" }} />}
-                      <div style={{ width: isFresh ? 7 : 4, height: isFresh ? 7 : 4, borderRadius:"50%", background: isFresh ? "#FFFFFF" : "rgba(215,228,230,0.40)" }} />
+                      {isNewest && <div style={{ position:"absolute", inset:-3, borderRadius:"50%", border:"0.5px solid rgba(255,255,255,0.4)" }} />}
+                      <div style={{ width: isNewest ? 7 : 4, height: isNewest ? 7 : 4, borderRadius:"50%", background: isNewest ? "#FFFFFF" : "rgba(215,228,230,0.40)" }} />
                     </div>
                     {!isLast && (
                       <div style={{
@@ -141,7 +185,7 @@ export function StatsPanel({ logs, sessionCount, stats }:
                   </div>
                   <div style={{ paddingBottom: isLast ? 0 : 10, flex:1 }}>
                     <div style={{ display:"flex", gap:4, alignItems:"center", marginBottom:2 }}>
-                      <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color: isFresh ? "rgba(240,246,248,0.90)" : "rgba(195,212,218,0.55)" }}>{log.time}</span>
+                      <span style={{ fontFamily:"var(--font-mono)", fontSize:9, color: isNewest ? "rgba(240,246,248,0.90)" : "rgba(195,212,218,0.55)" }}>{log.time}</span>
                       <span style={{
                         fontFamily:"var(--font-mono)", fontSize:8, color:C.textMuted,
                         background:"rgba(8,13,18,0.35)", borderRadius:3,
@@ -162,7 +206,7 @@ export function StatsPanel({ logs, sessionCount, stats }:
                         }}>休息</span>
                       )}
                     </div>
-                    <span style={{ fontSize:10, fontFamily:"var(--font-sans)", lineHeight:1.4, color: isFresh ? "#FFFFFF" : "rgba(220,232,236,0.65)" }}>{log.task}</span>
+                    <span style={{ fontSize:10, fontFamily:"var(--font-sans)", lineHeight:1.4, color: isNewest ? "#FFFFFF" : "rgba(220,232,236,0.65)" }}>{log.task}</span>
                   </div>
                 </div>
               );
@@ -226,8 +270,8 @@ function WeekLineChart({ data, todayIdx }: { data: Array<{ day: string; sessions
 }
 
 // ─── Stats Full Page ──────────────────────────────────────────────────────────
-export function StatsPage({ logs, sessionCount, stats }:
-  { logs: SessionLog[]; sessionCount: number; stats: Statistics | null }) {
+export function StatsPage({ logs, todayStats, stats }:
+  { logs: SessionLog[]; todayStats: Statistics | null; stats: Statistics | null }) {
 
   const todayIdx = (new Date().getDay()+6)%7;
 
@@ -259,7 +303,7 @@ export function StatsPage({ logs, sessionCount, stats }:
 
       <div style={{ padding:"14px 22px 0", display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))", gap:9 }}>
         {[
-          { label:"今日专注", value:sessionCount, unit:"次",  accent:true },
+          { label:"今日专注", value:todayStats?.focusSessionCount ?? 0, unit:"次",  accent:true },
           { label:"本周专注", value:stats?.focusSessionCount ?? 0, unit:"次",  accent:false },
           { label:"连续天数", value:stats?.streakDays ?? 0, unit:"天",  accent:false },
           { label:"最佳单日", value:bestDayLabel, unit:"",    accent:false },

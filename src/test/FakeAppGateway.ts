@@ -115,6 +115,15 @@ export class FakeAppGateway implements AppGateway {
       byProjectMap.set(s.projectSnapshot, entry)
     }
 
+    const byTagMap = new Map<string, { sessions: number; focusSeconds: number }>()
+    for (const s of focus) {
+      const tag = s.tagNameSnapshot ?? '其他'
+      const entry = byTagMap.get(tag) ?? { sessions: 0, focusSeconds: 0 }
+      entry.sessions += 1
+      entry.focusSeconds += s.focusedSeconds
+      byTagMap.set(tag, entry)
+    }
+
     const best = [...byDay.entries()].sort((a, b) => b[1].focusSeconds - a[1].focusSeconds)[0]
 
     return {
@@ -127,6 +136,7 @@ export class FakeAppGateway implements AppGateway {
       bestDay: best ? best[0] : null,
       byDay: [...byDay.entries()].map(([date, v]) => ({ date, ...v })),
       byProject: [...byProjectMap.entries()].map(([project, v]) => ({ project, ...v })),
+      byTag: [...byTagMap.entries()].map(([project, v]) => ({ project, ...v })),
     }
   }
 

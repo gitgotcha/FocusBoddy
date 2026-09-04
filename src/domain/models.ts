@@ -126,6 +126,7 @@ export interface Statistics {
   bestDay: string | null
   byDay: Array<{ date: string; sessions: number; focusSeconds: number }>
   byProject: Array<{ project: string; sessions: number; focusSeconds: number }>
+  byTag: Array<{ project: string; sessions: number; focusSeconds: number }>
 }
 
 export interface CommandError {

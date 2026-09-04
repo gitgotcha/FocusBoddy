@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { AppSettings, CreateTaskInput, ImportPreview, Statistics, Tag, Task, TaskPriority, TimerMode, TimerSession, TimerSnapshot } from "./domain/models";
 import { DEFAULT_SETTINGS, durationSecondsForMode } from "./domain/defaults";
-import { weekBoundaries, weekRange } from "./domain/statistics";
+import { todayBoundary, weekBoundaries, weekRange } from "./domain/statistics";
 import { formatTrayIndicator } from "./domain/tray";
 import { useAppGateway } from "./services/gatewayContext";
 
@@ -213,6 +213,7 @@ export default function App() {
   const [logs, setLogs]   = useState<SessionLog[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [weekStats, setWeekStats] = useState<Statistics | null>(null);
+  const [todayStats, setTodayStats] = useState<Statistics | null>(null);
   const [timer, setTimer] = useState<TimerSnapshot | null>(null);
   const [shortcutConflict, setShortcutConflict] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -240,8 +241,10 @@ export default function App() {
         setTasks(payload.tasks);
         setTags(payload.tags);
         setLogs(payload.sessions.map(sessionToLog));
+        setTags(payload.tags);
         setSettings(payload.settings);
         applyTimer(payload.timer);
+        setTodayStats(payload.statistics);
       })
       .catch(() => undefined);
   }, [gateway, applyTimer]);
@@ -250,6 +253,10 @@ export default function App() {
     const { from, to } = weekRange();
     gateway.getStatistics({ from, to, days: weekBoundaries() })
       .then(stats => { setWeekStats(stats); })
+      .catch(() => undefined);
+    const today = todayBoundary();
+    gateway.getStatistics({ from: today.from, to: today.to, days: [today] })
+      .then(stats => { setTodayStats(stats); })
       .catch(() => undefined);
   }, [gateway]);
 
@@ -520,7 +527,7 @@ export default function App() {
           }}
         />
       );
-      case "stats":    return <StatsPage  logs={logs} sessionCount={focusSessionCount} stats={weekStats} />;
+      case "stats":    return <StatsPage logs={logs} todayStats={todayStats} stats={weekStats} />;
       case "settings": return <SettingsPanel settings={settings} onSaveSettings={saveSettings} onDataChanged={() => { resync(); refreshStats(); }} />;
     }
   })();
@@ -580,7 +587,7 @@ export default function App() {
           </div>
         </main>
 
-        {showRight && <StatsPanel logs={logs} sessionCount={logs.length} stats={weekStats} />}
+        {showRight && <StatsPanel logs={logs} todayStats={todayStats} stats={weekStats} reduceMotion={activeSettings.reduceMotion} />}
       </div>
     </div>
   );

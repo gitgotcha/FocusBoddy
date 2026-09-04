@@ -122,7 +122,7 @@ export function TimerPanel({ timer, tasks, onStart, onPause, onResume, onReset, 
       <div style={{
         display: "flex", flexDirection: "column", alignItems: "center",
         justifyContent: "center", flex: 1,
-        gap: 14, padding: "10px 22px 14px",
+        gap: 12, padding: "8px 22px 11px",
         minHeight: 0,
       }}>
 

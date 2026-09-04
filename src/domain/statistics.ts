@@ -37,6 +37,11 @@ export function weekBoundaries(now: Date = new Date()): StatisticsDayBoundary[] 
   return Array.from({ length: 7 }, (_, i) => dayBoundary(addDays(monday, i)))
 }
 
+/** Boundary for today (local midnight .. next local midnight). */
+export function todayBoundary(now: Date = new Date()): StatisticsDayBoundary {
+  return dayBoundary(now)
+}
+
 /** Boundary range covering the whole week (from Monday 00:00 to Sunday 24:00). */
 export function weekRange(now: Date = new Date()): { from: number; to: number } {
   const days = weekBoundaries(now)
