@@ -38,4 +38,8 @@ export interface AppGateway {
   subscribeTimerExpired(cb: (payload: TimerExpiredPayload) => void): () => void
   /** Subscribes to tray menu actions (pause/resume, reset). Returns an unsubscribe. */
   subscribeTrayAction(cb: (action: TrayAction) => void): () => void
+  /** Whether the app launches at Windows login (autostart plugin state). */
+  getAutostart(): Promise<boolean>
+  /** Enables/disables launch-at-login; resolves to the resulting state. */
+  setAutostart(enabled: boolean): Promise<boolean>
 }

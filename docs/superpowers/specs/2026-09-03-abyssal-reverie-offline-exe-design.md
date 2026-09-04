@@ -21,7 +21,11 @@
 > - 休眠唤醒校正：计时本身由 `targetEndAt` 无漂移推导，唤醒后剩余时间自校正；另设 Rust 后台 1 Hz 只读 ticker，检测过期 running 会话即发 `timer-expired` 事件，前端据此调用幂等 `complete_timer`，确保隐藏/挂起期间完成也能可靠落库（避免 webview 定时器被节流/挂起而延迟完成）。
 > - 托盘文本（tooltip + 动态菜单项）由前端 `formatTrayIndicator` 纯函数推导、每秒推送一次（`set_tray_indicator` 命令），Rust 仅负责渲染。
 >
-> 仍不包含：开机自启、全局快捷键、代码签名（见后续迭代项）。
+> **范围变更（2026-09-04，第 2 项）**：开机自启与全局快捷键已从"非目标"提升为已实现能力。
+> - 开机自启：`tauri-plugin-autostart`；设置页"开机自动启动"开关，命令 `get_autostart`/`set_autostart` 包裹 `app.autolaunch()`。状态存于插件/系统注册表，**不进本项目 SQLite**（无需迁移 settings 表，且自启本属 OS 级关注）。
+> - 全局快捷键：`tauri-plugin-global-shortcut`，固定 `CommandOrControl+Alt+Space`（显示为 Ctrl+Alt+空格）。handler 显示窗口并 `emit("tray-action", TrayAction::Toggle)`，复用已有的 pause/resume/显示逻辑（运行中→暂停、暂停中→继续、空闲→显示窗口）。
+>
+> 仍不包含：代码签名（见最后正式打包步骤）。
 
 应用不启动本地 HTTP 服务，不监听本地业务端口，不依赖网络下载运行时资源。
 

@@ -59,4 +59,7 @@ export class TauriAppGateway implements AppGateway {
       .catch(() => undefined)
     return () => { stopped = true; unlisten?.() }
   }
+
+  getAutostart() { return invoke<boolean>('get_autostart') }
+  setAutostart(enabled: boolean) { return invoke<boolean>('set_autostart', { enabled }) }
 }

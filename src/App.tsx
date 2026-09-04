@@ -871,6 +871,20 @@ function SettingsPanel({ settings, onSaveSettings }: {
     });
   }, [persist]);
 
+  // Launch-at-login lives in the autostart plugin / OS registry, not in our
+  // SQLite `settings` table, so it is tracked with its own local state.
+  const [launchAtLogin, setLaunchAtLogin] = useState<boolean | null>(null);
+  useEffect(() => {
+    gateway.getAutostart()
+      .then(setLaunchAtLogin)
+      .catch(() => setLaunchAtLogin(false));
+  }, [gateway]);
+
+  const toggleLaunchAtLogin = useCallback((next: boolean) => {
+    setLaunchAtLogin(next);
+    gateway.setAutostart(next).then(setLaunchAtLogin).catch(() => undefined);
+  }, [gateway]);
+
   const Toggle = ({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) => (
     <button onClick={() => onChange(!value)} className="btn-toggle"
       role="switch" aria-checked={value}
@@ -968,6 +982,10 @@ function SettingsPanel({ settings, onSaveSettings }: {
         </Section>
         <Section label="目标">
           <Row label="每日专注次数" last><Stepper value={draft.dailyGoal} onChange={v => update({ dailyGoal: v })} min={1} max={50} /></Row>
+        </Section>
+        <Section label="系统">
+          <Row label="开机自动启动" hint="登录 Windows 后于后台自动运行"><Toggle value={launchAtLogin ?? false} onChange={toggleLaunchAtLogin} /></Row>
+          <Row label="全局快捷键" hint="Ctrl + Alt + 空格：开始 / 暂停（窗口隐藏时也能用）" last><span style={{ fontFamily:"var(--font-mono)", fontSize:10, color:C.textMuted }}>Ctrl+Alt+Space</span></Row>
         </Section>
         <div style={{ ...CARD, borderRadius:12, padding:"11px 13px", marginBottom:20 }}>
           <div style={{ fontSize:9, color:"rgba(165,182,188,0.34)", marginBottom:4, fontFamily:"var(--font-sans)", letterSpacing:"0.10em", textTransform:"uppercase" }}>关于</div>

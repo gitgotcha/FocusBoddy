@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use tauri::{Emitter, Manager, WindowEvent};
+use tauri_plugin_autostart::ManagerExt;
 
 pub mod commands;
 pub mod db;
@@ -10,6 +11,10 @@ pub mod error;
 pub mod models;
 pub mod repository;
 pub mod tray;
+
+/// Global hotkey that toggles start/pause/resume from anywhere (mirrors the
+/// tray menu's toggle action). Kept in sync with the Settings panel label.
+const GLOBAL_SHORTCUT: &str = "CommandOrControl+Alt+Space";
 
 /// Managed Tauri state: the single SQLite connection shared by every command.
 pub struct AppState {
@@ -29,6 +34,22 @@ fn set_tray_indicator(app: tauri::AppHandle, input: tray::TrayIndicator) {
     tray::apply_indicator(&app, &input);
 }
 
+/// Whether the app is registered to launch at Windows login (backed by the
+/// autostart plugin / OS registry, not our SQLite — see design doc §N/A).
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> bool {
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+/// Enables/disables launch-at-login. Returns the resulting enabled state so the
+/// frontend can reconcile its toggle even if the OS registry write failed.
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> bool {
+    let mgr = app.autolaunch();
+    let _ = if enabled { mgr.enable() } else { mgr.disable() };
+    mgr.is_enabled().unwrap_or(false)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -41,6 +62,27 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_shortcut(GLOBAL_SHORTCUT)
+                .expect("invalid global shortcut accelerator")
+                .with_handler(|app, _shortcut, _event| {
+                    // Reveal the window if it is hidden to the tray, then let
+                    // the existing tray-action handler toggle start/pause/resume
+                    // using the user's current timer state.
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                    let _ = app.emit("tray-action", tray::TrayAction::Toggle);
+                })
+                .build(),
+        )
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let db_path = data_dir.join("abyssal-reverie.sqlite");
@@ -76,6 +118,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             health_check,
             set_tray_indicator,
+            get_autostart,
+            set_autostart,
             commands::bootstrap_app,
             commands::create_task,
             commands::update_task,

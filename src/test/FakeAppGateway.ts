@@ -352,6 +352,22 @@ export class FakeAppGateway implements AppGateway {
     return () => undefined
   }
 
+  // --- Autostart (in-memory stub for tests) ---
+
+  /** Mirrors the OS registry state for component tests. */
+  launchAtLogin = false
+
+  async getAutostart(): Promise<boolean> {
+    this.takeFailure()
+    return this.launchAtLogin
+  }
+
+  async setAutostart(enabled: boolean): Promise<boolean> {
+    this.takeFailure()
+    this.launchAtLogin = enabled
+    return enabled
+  }
+
   private expectedRevision(input: TimerRevisionInput): number {
     // Optimistic concurrency: reject stale writes the same way Rust would.
     if (input.expectedRevision < this.timer.revision) {
