@@ -2173,6 +2173,37 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_a_bad_backup_and_leaves_existing_data_intact() {
+        let mut conn = db::open_in_memory().expect("db");
+
+        // Seed real, in-use data: a task and a completed focus session.
+        let task = insert_task(&conn, &CreateTaskInput {
+            title: "Real task".to_owned(),
+            pomodoro_target: 2,
+            priority: TaskPriority::High,
+            project: "Real".to_owned(),
+        }).expect("seed task");
+        seed_session(&conn, "real-session", TimerMode::Focus, SessionStatus::Completed, "Real", 1500);
+
+        // Build a backup from current data, then corrupt it (oversized title).
+        let mut bundle = export_data(&conn).expect("export");
+        bundle.tasks[0].title = "x".repeat(MAX_TITLE_CHARS + 1);
+
+        let result = import_data(&mut conn, &bundle);
+        assert!(matches!(result, Err(ref e) if e.code == crate::error::ErrorCode::ValidationError));
+
+        // Existing task + session must be untouched (no partial overwrite).
+        let tasks = list_tasks(&conn).expect("list tasks");
+        assert_eq!(tasks.len(), 1, "existing task count preserved");
+        assert_eq!(tasks[0].id, task.id);
+        assert_eq!(tasks[0].title, "Real task", "existing task not overwritten");
+
+        let sessions = list_sessions(&conn, 10).expect("list sessions");
+        assert_eq!(sessions.len(), 1, "existing session count preserved");
+        assert_eq!(sessions[0].id, "real-session");
+    }
+
+    #[test]
     fn export_sessions_csv_escapes_special_characters() {
         let conn = db::open_in_memory().expect("db");
         seed_session(&conn, "s,1", TimerMode::Focus, SessionStatus::Completed, "Pro,ject", 1500);

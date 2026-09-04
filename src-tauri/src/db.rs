@@ -79,6 +79,12 @@ pub fn open_in_memory() -> Result<Connection, CommandError> {
 }
 
 /// Opens (or creates) the on-disk database, creating parent directories as needed.
+///
+/// Defensive against a corrupt on-disk database (P0: the app must still start):
+/// if the file cannot be opened/migrated/seeded, or fails `PRAGMA integrity_check`,
+/// it is renamed aside with a `.corrupt-<timestamp>` suffix (preserved for manual
+/// recovery) and a fresh database is created in its place. The corrupt file is
+/// never silently discarded.
 pub fn open_at(path: &Path) -> Result<Connection, CommandError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -91,11 +97,65 @@ pub fn open_at(path: &Path) -> Result<Connection, CommandError> {
         }
     }
 
+    match try_open_at(path) {
+        Ok(conn) if is_healthy(&conn) => Ok(conn),
+        Ok(conn) => {
+            // Opened but failed the integrity check — recover from a renamed copy.
+            drop(conn);
+            recover_corrupt(path)?;
+            try_open_at(path)
+        }
+        Err(_) => {
+            // Could not open/migrate/seed — recover from a renamed copy.
+            recover_corrupt(path)?;
+            try_open_at(path)
+        }
+    }
+}
+
+/// Opens, configures, migrates and seeds a database. Any failure here signals
+/// either an unreadable file or a schema problem, both of which `open_at`
+/// resolves by renaming the file aside and starting fresh.
+fn try_open_at(path: &Path) -> Result<Connection, CommandError> {
     let mut conn = Connection::open(path)?;
     configure(&conn, true)?;
     run_migrations(&mut conn)?;
     seed_defaults(&conn)?;
     Ok(conn)
+}
+
+/// A healthy database reports exactly "ok" from `PRAGMA integrity_check`.
+fn is_healthy(conn: &Connection) -> bool {
+    conn.pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0))
+        .map(|v| v.eq_ignore_ascii_case("ok"))
+        .unwrap_or(false)
+}
+
+/// Renames a possibly-corrupt database (and its WAL/SHM siblings) aside with a
+/// `.corrupt-<timestamp>` suffix so the user can recover it manually later,
+/// then lets a subsequent `try_open_at` create a fresh file at `path`. Rename
+/// errors are ignored — if the file is locked we still attempt a fresh open.
+fn recover_corrupt(path: &Path) -> Result<(), CommandError> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let base = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if base.is_empty() {
+        return Ok(());
+    }
+    let suffix = format!(".corrupt-{ts}");
+    for name in [base.clone(), format!("{base}-wal"), format!("{base}-shm")] {
+        let candidate = path.with_file_name(&name);
+        if candidate.exists() {
+            let backup = path.with_file_name(format!("{name}{suffix}"));
+            let _ = std::fs::rename(&candidate, &backup);
+        }
+    }
+    Ok(())
 }
 
 /// Applies the startup pragmas from the design spec: `foreign_keys = ON`,
@@ -371,5 +431,65 @@ mod tests {
 
         assert_eq!(task_id, None, "foreign key should null out on delete");
         assert_eq!(title, "Deep work", "snapshots must survive task deletion");
+    }
+
+    #[test]
+    fn corrupt_database_is_recovered_by_reseeding() {
+        let dir = std::env::temp_dir().join(format!(
+            "abyssal-recover-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let db_path = dir.join("abyssal-reverie.sqlite");
+        // Garbage bytes that are not a valid SQLite database.
+        std::fs::write(&db_path, b"not a sqlite database at all\x00\x01\x02")
+            .expect("write garbage");
+
+        let conn = open_at(&db_path).expect("open_at should recover from corruption");
+
+        // Fresh, healthy database: default settings + idle timer present.
+        let (focus, goal) = conn
+            .query_row(
+                "SELECT focus_duration_minutes, daily_goal FROM settings WHERE id = 1",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .expect("settings should exist");
+        assert_eq!(focus, 25);
+        assert_eq!(goal, 8);
+        assert!(is_healthy(&conn), "recovered database must be healthy");
+
+        // The corrupt file was preserved with a `.corrupt-` suffix for manual recovery.
+        let preserved = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".corrupt-"));
+        assert!(preserved, "corrupt file must be preserved for manual recovery");
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_database_is_created_and_seeded_on_first_open() {
+        let dir = std::env::temp_dir().join(format!(
+            "abyssal-empty-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let db_path = dir.join("abyssal-reverie.sqlite");
+
+        let conn = open_at(&db_path).expect("open_at should create a fresh database");
+        assert!(is_healthy(&conn));
+        assert_eq!(count(&conn, "settings"), 1);
+        assert_eq!(count(&conn, "timer_state"), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
