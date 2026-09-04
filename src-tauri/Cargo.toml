@@ -2,6 +2,7 @@
 name = "abyssal-reverie"
 version = "1.0.0"
 description = "Abyssal Reverie offline focus timer"
+license = "MIT"
 authors = ["Abyssal Reverie"]
 edition = "2021"
 

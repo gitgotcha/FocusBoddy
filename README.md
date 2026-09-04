@@ -126,5 +126,7 @@ pnpm test:run         # 前端测试；Rust 测试：cd src-tauri && cargo test
 
 ## 八、许可证
 
-本项目代码暂未附带开源许可证（保留所有权利）。如需以 MIT/Apache-2.0 等协议使用，
-请提交 Issue 联系作者。
+- 本项目的**代码**以 [MIT License](LICENSE) 开源：可自由使用、修改、再分发（含商用），
+  唯一要求是在副本中保留原始版权与许可声明。
+- 注意：随应用分发的**第三方素材**（海洋视频、字体、图标等）遵循其各自许可，
+  详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；再分发安装包时请一并保留该文件。
