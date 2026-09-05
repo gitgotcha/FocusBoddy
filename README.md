@@ -109,6 +109,22 @@ pnpm tauri build      # 产出正式安装包（src-tauri/target/release/bundle/
 pnpm test:run         # 前端测试；Rust 测试：cd src-tauri && cargo test
 ```
 
+> ⚠️ **直接调用 `cargo` 构建时必须带上 `custom-protocol` 特性**：
+>
+> ```bash
+> cargo build --release --features custom-protocol
+> ```
+>
+> Tauri 2 的 `tauri-build` 用 `dev = !custom-protocol` 判定构建模式。不带该特性时
+> 前端资源不会被嵌入二进制，运行时会改用 `devUrl`（http://127.0.0.1:1420）加载界面，
+> 在没有开发服务器的机器上表现为**启动后永久白屏**。`pnpm tauri build` 由 CLI 自动
+> 补上该特性，所以不会出现这个问题。
+>
+> 自检方法：产物应约 20 MB（嵌入了 `dist/` 前端资源）。若只有 12 MB，说明资源未嵌入。
+> ```bash
+> grep -a -c "ocean-loop" src-tauri/target/release/abyssal-reverie.exe   # 期望 ≥ 1
+> ```
+
 技术栈：Tauri 2 + React 19 + TypeScript + Vite + Rust + SQLite（rusqlite）。
 计时以 Rust 端 `target_end_at` 时间戳推导，休眠/锁屏不漂移；数据层带 `user_version`
 迁移、WAL、完整性检查与损坏自愈。

@@ -13,6 +13,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# Required for production builds: without it Tauri's build script sets
+# `dev = !custom-protocol = true`, which skips embedding `frontendDist` into the
+# binary and makes the app load its UI from `devUrl` (http://127.0.0.1:1420).
+# That produces a permanently white window. DO NOT REMOVE.
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
