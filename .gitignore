@@ -23,3 +23,7 @@ logs/
 # beside it.
 /.plugins/
 /.opencode-skills/
+
+# Built binaries kept for delivery. ~20 MB per release, and the shipped
+# SHA-256 is recorded in docs/ instead of storing the binary in history.
+/release/

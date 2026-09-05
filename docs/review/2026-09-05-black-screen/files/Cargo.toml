@@ -1,0 +1,32 @@
+[package]
+name = "abyssal-reverie"
+version = "1.1.0"
+description = "Abyssal Reverie offline focus timer"
+license = "MIT"
+authors = ["Abyssal Reverie"]
+edition = "2021"
+
+[lib]
+name = "abyssal_reverie_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# Required for production builds: without it Tauri's build script sets
+# `dev = !custom-protocol = true`, which skips embedding `frontendDist` into the
+# binary and makes the app load its UI from `devUrl` (http://127.0.0.1:1420).
+# That produces a permanently white window. DO NOT REMOVE.
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+uuid = { version = "1.26.0", features = ["v4"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
