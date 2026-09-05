@@ -41,10 +41,14 @@
 分发形态下便携版**不包含** WebView2 运行时，依赖系统已安装（Win11 / 已更新的 Win10 自带），
 已在 RELEASE_NOTES 中明确标注。
 
+### 发布状态（2026-09-05）
+- ✅ Release 已发布并挂 Latest：<https://github.com/gitgotcha/abyssal-reverie/releases/tag/v1.1.1>
+- ✅ 标签 `v1.1.1` 已推送至 origin，指向 `15b2ab0`，与 Release、应用内版本号、产物 SHA-256 对应同一次构建
+- ✅ 分发资产（4 个）：`abyssal-reverie.exe`（20,717,056 B）、`Abyssal-Reverie_1.1.1_windows-x64_portable.zip`（12,558,782 B）、`SHA256SUMS.txt`、`RELEASE_NOTES.md`，远端摘要与本地逐字节一致
+- ✅ 旧 v1.1.0 Release 已标注"已知启动黑屏，请勿使用"并降为 Pre-release；Latest 由 v1.1.1 接替
+
 ### 待办
-- 用户实机验收（ACCEPTANCE_GUIDE H 组 + 既有 A–G 组）
-- 验收通过后发布 v1.1.1 Release（当前为草稿）
-- 打 v1.1.1 标签（发布时随 Release 一并创建）
+- 用户实机验收（ACCEPTANCE_GUIDE H1–H8 + 既有 A–G 组）；Release 已公开，验收中发现的缺陷将以 v1.1.2 修复发布
 
 > 质量闸门（Item 4）：冻结功能范围，仅修复 P0/P1/P2 缺陷。所有 P0/P1 清零后方可发布。
 > 每轮修复后均以真实 Windows EXE 验收（非开发模式）。
