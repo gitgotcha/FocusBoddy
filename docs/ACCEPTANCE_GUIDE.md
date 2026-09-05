@@ -1,8 +1,10 @@
-# Abyssal Reverie v1.0.0 — 实机验收操作手册
+# Abyssal Reverie v1.1.1 — 实机验收操作手册
 
-> 适用：正式安装包 `Abyssal Reverie_1.0.0_x64-setup.exe` 与便携版 `abyssal-reverie.exe`。
+> 适用：便携版 `abyssal-reverie.exe`（v1.1.1，Release 分发形态）与
+> 完整离线安装包 `Abyssal Reverie_1.1.1_x64-setup.exe`（**未随 Release 分发**，本地 `pnpm tauri build` 构建）。
 > 每项按「操作 → 预期结果」执行并打勾；任何一项不符即为不通过，记录步骤号与现象。
 > 建议顺序执行 A→G；时间紧张时至少完成 **A、B、C1/C2、D1/D2/D5**（P0 核心项，约 20 分钟）。
+> v1.1 新增项见第 H 节（H1–H8）。
 
 ---
 
@@ -12,16 +14,17 @@
 以管理员之外的普通 PowerShell 执行：
 
 ```powershell
-Get-FileHash "D:\Project\abyssal-reverie\Abyssal Reverie\src-tauri\target\release\bundle\nsis\Abyssal Reverie_1.1.0_x64-setup.exe" -Algorithm SHA256
 Get-FileHash "D:\Project\abyssal-reverie\Abyssal Reverie\src-tauri\target\release\abyssal-reverie.exe" -Algorithm SHA256
+Get-FileHash "D:\Project\abyssal-reverie\Abyssal Reverie\release\v1.1.1\Abyssal-Reverie_1.1.1_windows-x64_portable.zip" -Algorithm SHA256
 ```
 
 或用 `certutil -hashfile "<路径>" SHA256`。
 
 | 文件 | 大小 | 预期 SHA-256 |
 |------|------|--------------|
-| 安装包（v1.1.0 NSIS） | 273,655,742 B | `632adb11121eabee7a50ea4032f6a2c0794ce771b9df0c5068e93c8dae789041` |
-| 便携版（v1.1.0） | 20,717,056 B | `e05f7aab4fef00ff3afcaa80df153d40a290552c0ffd0f58c485dc166d8b6ea8` |
+| 便携版 EXE（v1.1.1，**验收用这个**） | 20,717,056 B | `037dbea5845a187a0007ae066de289210f2eb7a8b3884abd8ae3b5178e049e5c` |
+| 便携版压缩包（v1.1.1，Release 分发形态） | 12,558,782 B | `00e0417ef5f3c25a8e842a46ddbfb00efd0a1bdeee7618acd0850231add3db95` |
+| 完整离线安装版（v1.1.1 NSIS，未随 Release 分发） | 273,655,309 B | `d6bf43c455cc193c71a39edd7c80d3849f2c012f852b1b9bf3d9562a777a2a77` |
 
 > 若你重新执行 `pnpm tauri build`，哈希会变（构建非逐字节可复现），以本地重新计算的为准。
 

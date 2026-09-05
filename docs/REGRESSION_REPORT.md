@@ -24,19 +24,27 @@
 - E/F 前端：纯机械拆分（App.tsx 1814→约 550 行）→ DurationStepper/三按钮/结束流/TagManager/活动栏/统计权威化/byTag/密度
 - 门禁：cargo test **95 passed**（+1 ignored 真实库演练）；tsc 0；vitest **29 passed**；cargo release EXE 构建 ✓
 
-### 交付物（v1.1.0，2026-09-05 构建；wmic 解禁后）
+### 交付物（v1.1.1，2026-09-05 构建）
 
 | 交付物 | 路径 | 大小 | SHA-256 |
 |--------|------|------|---------|
-| **正式安装版**（NSIS，含 WebView2 offlineInstaller） | `src-tauri/target/release/bundle/nsis/Abyssal Reverie_1.1.0_x64-setup.exe` | 273,655,742 B（≈260.9 MB） | `632adb11121eabee7a50ea4032f6a2c0794ce771b9df0c5068e93c8dae789041` |
-| **便携版**（单文件，资源内嵌，免安装直接运行） | `src-tauri/target/release/abyssal-reverie.exe` | 20,717,056 B（≈19.8 MB） | `e05f7aab4fef00ff3afcaa80df153d40a290552c0ffd0f58c485dc166d8b6ea8` |
-| 交付副本（同上便携版） | `release/Abyssal Reverie v1.1.0.exe` | 20,717,056 B | 同上 |
+| **便携版 EXE**（单文件，资源内嵌，免安装直接运行） | `src-tauri/target/release/abyssal-reverie.exe` | 20,717,056 B（≈19.8 MB） | `037dbea5845a187a0007ae066de289210f2eb7a8b3884abd8ae3b5178e049e5c` |
+| 便携版压缩包（Release 分发形态） | `release/v1.1.1/Abyssal-Reverie_1.1.1_windows-x64_portable.zip` | 12,558,782 B（≈12.0 MB） | `00e0417ef5f3c25a8e842a46ddbfb00efd0a1bdeee7618acd0850231add3db95` |
+| **完整离线安装版**（NSIS，含 WebView2 offlineInstaller，**未随 Release 分发**） | `src-tauri/target/release/bundle/nsis/Abyssal Reverie_1.1.1_x64-setup.exe` | 273,655,309 B（≈261.0 MB） | `d6bf43c455cc193c71a39edd7c80d3849f2c012f852b1b9bf3d9562a777a2a77` |
 
-两个 EXE 均包含 `0918769` 的 ErrorBoundary，前端渲染失败时显示可读错误页而非黑屏。
+三个产物均构建自提交 `15b2ab0`（版本号统一 1.1.1），均包含 `0918769` 的 ErrorBoundary，
+前端渲染失败时显示可读错误页而非黑屏；静态校验确认前端资源已内嵌
+（EXE 中可检索 `ocean-loop` / `ocean-poster` / `focus-complete` / `index-*` 标记）。
+
+**Release 分发范围**：仅便携版。安装版因体积（273 MB）超出本环境单连接约 6 分钟的
+上传上限、且用户侧上传同样受限，决定不随 Release 分发，改为本地构建自用。
+分发形态下便携版**不包含** WebView2 运行时，依赖系统已安装（Win11 / 已更新的 Win10 自带），
+已在 RELEASE_NOTES 中明确标注。
 
 ### 待办
 - 用户实机验收（ACCEPTANCE_GUIDE H 组 + 既有 A–G 组）
-- 合入 main、打 v1.1.0 标签、GitHub Release（推送门控）
+- 验收通过后发布 v1.1.1 Release（当前为草稿）
+- 打 v1.1.1 标签（发布时随 Release 一并创建）
 
 > 质量闸门（Item 4）：冻结功能范围，仅修复 P0/P1/P2 缺陷。所有 P0/P1 清零后方可发布。
 > 每轮修复后均以真实 Windows EXE 验收（非开发模式）。

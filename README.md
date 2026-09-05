@@ -5,7 +5,10 @@
 
 - 当前版本：**v1.1.1**（2026-09-05）
 - 系统要求：Windows 10 / 11，64 位
-- 安装包内置 WebView2 运行时，**没有网络也能安装和使用**
+- **Release 提供便携版**（解压即用）；便携版**不包含** WebView2 运行时，
+  Windows 11 与保持更新的 Windows 10 已自带，无需处理
+- 完整离线安装包（内嵌 WebView2 运行时，无网可装）未随 Release 分发，
+  需要时从源码执行 `pnpm tauri build` 自行构建
 
 > **v1.1.0 用户请注意**：v1.1.0 的发布构建存在启动黑屏问题（前端资源未内嵌），
 > 请直接升级到 v1.1.1。数据格式一致，原数据不受影响。
@@ -14,35 +17,43 @@
 
 ## 一、下载与安装（新手照做即可）
 
-### 方式 1：安装版（推荐）
+### Release 提供的：便携版（免安装）
 
 1. 打开本仓库的 [Releases 页面](https://github.com/gitgotcha/abyssal-reverie/releases)。
-2. 下载 `Abyssal Reverie_1.0.0_x64-setup.exe`（约 261 MB，内置运行时所以较大）。
-3. 双击运行，一路点「下一步」直到完成（不需要管理员权限）。
-4. 从开始菜单点击 **Abyssal Reverie** 启动。
+2. 下载 `Abyssal-Reverie_1.1.1_windows-x64_portable.zip`（约 12 MB）。
+3. 解压后双击里面的 `abyssal-reverie.exe` 即可使用。
+4. 不想要了？直接删除这个文件就行。
 
 > **如果 Windows 弹出蓝色警告「Windows 已保护你的电脑」**：
 > 这是程序未做数字签名的常见提示，不是病毒。点击「更多信息」→「仍要运行」即可。
 > 不放心的话，可先按下文校验文件 SHA-256。
 
-### 方式 2：便携版（免安装）
+> **关于 WebView2 运行时**：便携版**不包含**它，依赖系统已安装。
+> Windows 11 与保持更新的 Windows 10 均已自带，一般无需处理。
+> 若启动时提示缺少 WebView2，去 [Microsoft 官网](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)
+> 下载安装 WebView2 Runtime 即可（仅这一步需要联网）。
 
-1. 在 Releases 页面下载 `abyssal-reverie.exe`（约 20 MB，单文件）。
-2. 放到任意文件夹（支持中文、空格路径），直接双击即可使用。
-3. 不想要了？直接删除这个文件就行。
+### 完整离线安装版（未随 Release 分发）
 
-> 两个版本的数据是互通的（存在同一个位置），可以混用。
+安装版会把 258 MB 的 WebView2 离线运行时打包进安装包（总体积约 261 MB，断网也能装），
+但受文件体积所限未随 Release 提供。需要时从源码构建：
+
+```powershell
+pnpm install
+pnpm tauri build
+# 产物：src-tauri/target/release/bundle/nsis/Abyssal Reverie_1.1.1_x64-setup.exe
+```
 
 ### 校验下载的文件没被篡改（可选）
 
 按 `Win` 键 → 输入 `powershell` → 回车，粘贴（路径换成你的下载位置）：
 
 ```powershell
-Get-FileHash "C:\Users\你\Downloads\Abyssal Reverie_1.0.0_x64-setup.exe" -Algorithm SHA256
+Get-FileHash "C:\Users\你\Downloads\Abyssal-Reverie_1.1.1_windows-x64_portable.zip" -Algorithm SHA256
 ```
 
-安装版应为 `5ade6fd92dceedf9d0ecfdc137db98851e1ffead0e4cb27226721e9862afaeed`，
-便携版应为 `8dde4a96338c958cb82418a5909fb7788880cca9c7c7194b6ec112bf37bb332b`。
+便携版 zip 应为 `00e0417ef5f3c25a8e842a46ddbfb00efd0a1bdeee7618acd0850231add3db95`，
+解压出的 `abyssal-reverie.exe` 应为 `037dbea5845a187a0007ae066de289210f2eb7a8b3884abd8ae3b5178e049e5c`。
 
 ---
 
