@@ -468,7 +468,8 @@ Chromium 的 sandbox broker 在创建 GPU / 渲染子进程时，需要向 `ntdl
 - [x] 恢复 `tauri.conf.json`（`devUrl` = `http://127.0.0.1:1420`）
 - [ ] **v1.1 真机验收**：按 `docs/ACCEPTANCE_GUIDE.md` 第 H 节（H1–H8）逐条走一遍  
   （注意：必须由**用户手动双击**运行，不能由 Agent 启动）
-- [ ] 清理 `dist-probe/`、`EBWebView.bak-*`（共 6 份备份）、`D:/Project/abyssal-reverie/v10-ref` worktree
-- [ ] 应用层加固（可选）：`src/` 中目前**没有任何 ErrorBoundary**，可补一个渲染失败兜底
-- [ ] `git push` 提交 `5d3659c`（仅本地提交，待授权）
+- [x] 清理 `dist-probe/`、`EBWebView.bak-*`（共 6 份备份）、`D:/Project/abyssal-reverie/v10-ref` worktree  
+  （已移至 `%TEMP%\ar-cleanup\`，未删除；worktree 的 `node_modules` 是符号链接，用 `unlink` 而非 `rm -rf` 处理）
+- [x] 应用层加固：`src/components/ErrorBoundary.tsx`，挂载在 `GatewayProvider` 外层，含 5 条单元测试
+- [x] `git push` 提交 `5d3659c`（连同 ErrorBoundary `0918769` 与排查文档 `4d51521`）
 - [x] NSIS 全量安装包：需先从安全中心黑名单移除 `wmic.exe`

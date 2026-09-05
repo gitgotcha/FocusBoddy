@@ -12,16 +12,18 @@
 以管理员之外的普通 PowerShell 执行：
 
 ```powershell
-Get-FileHash "D:\Project\abyssal-reverie\Abyssal Reverie\src-tauri\target\release\bundle\nsis\Abyssal Reverie_1.0.0_x64-setup.exe" -Algorithm SHA256
+Get-FileHash "D:\Project\abyssal-reverie\Abyssal Reverie\src-tauri\target\release\bundle\nsis\Abyssal Reverie_1.1.0_x64-setup.exe" -Algorithm SHA256
 Get-FileHash "D:\Project\abyssal-reverie\Abyssal Reverie\src-tauri\target\release\abyssal-reverie.exe" -Algorithm SHA256
 ```
 
 或用 `certutil -hashfile "<路径>" SHA256`。
 
-| 文件 | 预期 SHA-256 |
-|------|--------------|
-| 安装包 | `5ade6fd92dceedf9d0ecfdc137db98851e1ffead0e4cb27226721e9862afaeed` |
-| 便携版 | `8dde4a96338c958cb82418a5909fb7788880cca9c7c7194b6ec112bf37bb332b` |
+| 文件 | 大小 | 预期 SHA-256 |
+|------|------|--------------|
+| 安装包（v1.1.0 NSIS） | 273,655,742 B | `632adb11121eabee7a50ea4032f6a2c0794ce771b9df0c5068e93c8dae789041` |
+| 便携版（v1.1.0） | 20,717,056 B | `e05f7aab4fef00ff3afcaa80df153d40a290552c0ffd0f58c485dc166d8b6ea8` |
+
+> 若你重新执行 `pnpm tauri build`，哈希会变（构建非逐字节可复现），以本地重新计算的为准。
 
 ### 0.2 记录方式
 - 复制本文件，逐项把 `- [ ]` 改为 `- [x]`（通过）或标注「不通过 + 现象」。

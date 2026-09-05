@@ -22,17 +22,21 @@
 - C 计时：finish_timer 幂等先行、30 秒资格（ceil 等价 ms 阈值）、reset 内部落库、switch CONFLICT（D-2）
 - D 备份：v2 版本头优先（v1 独立 DTO 兼容导入）、CSV 5 新列、隐藏记录往返保留
 - E/F 前端：纯机械拆分（App.tsx 1814→约 550 行）→ DurationStepper/三按钮/结束流/TagManager/活动栏/统计权威化/byTag/密度
-- 门禁：cargo test **95 passed**（+1 ignored 真实库演练）；tsc 0；vitest **24 passed**；cargo release EXE 构建 ✓
+- 门禁：cargo test **95 passed**（+1 ignored 真实库演练）；tsc 0；vitest **29 passed**；cargo release EXE 构建 ✓
 
-### 交付物
-- 便携版：`src-tauri/target/release/abyssal-reverie.exe`（12,176,384 字节，SHA-256 `f52bfa36de3349904e318ba85a8cfcdb5f79a1dbc6b8646b8c154c61f6302d33`）
-- NSIS 安装包：**待构建**——本环境 wmic.exe 被沙箱黑名单拦截（需用户移除后执行 `pnpm tauri build`）
-- 文档：CHANGELOG v1.1.0、KNOWN_ISSUES KI-08~10、ACCEPTANCE_GUIDE H1–H8
+### 交付物（v1.1.0，2026-09-05 构建；wmic 解禁后）
+
+| 交付物 | 路径 | 大小 | SHA-256 |
+|--------|------|------|---------|
+| **正式安装版**（NSIS，含 WebView2 offlineInstaller） | `src-tauri/target/release/bundle/nsis/Abyssal Reverie_1.1.0_x64-setup.exe` | 273,655,742 B（≈260.9 MB） | `632adb11121eabee7a50ea4032f6a2c0794ce771b9df0c5068e93c8dae789041` |
+| **便携版**（单文件，资源内嵌，免安装直接运行） | `src-tauri/target/release/abyssal-reverie.exe` | 20,717,056 B（≈19.8 MB） | `e05f7aab4fef00ff3afcaa80df153d40a290552c0ffd0f58c485dc166d8b6ea8` |
+| 交付副本（同上便携版） | `release/Abyssal Reverie v1.1.0.exe` | 20,717,056 B | 同上 |
+
+两个 EXE 均包含 `0918769` 的 ErrorBoundary，前端渲染失败时显示可读错误页而非黑屏。
 
 ### 待办
 - 用户实机验收（ACCEPTANCE_GUIDE H 组 + 既有 A–G 组）
-- wmic 白名单后构建正式 NSIS 安装包并补 SHA-256
-- 合入 main、打 v1.1.0、GitHub Release（推送门控）
+- 合入 main、打 v1.1.0 标签、GitHub Release（推送门控）
 
 > 质量闸门（Item 4）：冻结功能范围，仅修复 P0/P1/P2 缺陷。所有 P0/P1 清零后方可发布。
 > 每轮修复后均以真实 Windows EXE 验收（非开发模式）。
